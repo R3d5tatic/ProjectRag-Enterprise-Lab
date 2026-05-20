@@ -15,6 +15,18 @@ internal sealed class DocumentConfiguration : IEntityTypeConfiguration<Document>
         builder.Property(x => x.ContentHash).HasMaxLength(128);
         builder.Property(x => x.SourceType).HasMaxLength(100);
 
+        builder.HasOne(x => x.KnowledgeBase)
+            .WithMany(x => x.Documents)
+            .HasForeignKey(x => x.KnowledgeBaseId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne(x => x.DataSource)
+            .WithMany(x => x.Documents)
+            .HasForeignKey(x => x.DataSourceId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         builder.HasIndex(x => x.ContentHash);
+        builder.HasIndex(x => x.KnowledgeBaseId);
+        builder.HasIndex(x => x.DataSourceId);
     }
 }

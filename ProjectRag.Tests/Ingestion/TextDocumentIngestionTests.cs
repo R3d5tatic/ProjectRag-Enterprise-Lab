@@ -1,6 +1,10 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using ProjectRag.Domain.Entities;
+using Microsoft.Extensions.Options;
 using ProjectRag.Domain.Enums;
+using ProjectRag.Infrastructure;
 using ProjectRag.Infrastructure.Ingestion;
+using ProjectRag.Infrastructure.Options;
 using ProjectRag.Tests.Support;
 
 namespace ProjectRag.Tests.Ingestion;
@@ -10,7 +14,7 @@ public sealed class TextDocumentIngestionTests
     [Fact]
     public void Chunk_splits_text_into_ordered_chunks()
     {
-        var chunker = new SimpleTextChunker();
+        var chunker = CreateChunker();
 
         var text = """
             # Late Payment Policy
@@ -29,6 +33,41 @@ public sealed class TextDocumentIngestionTests
     }
 
     [Fact]
+    public void Chunk_uses_configured_max_chunk_size()
+    {
+        var chunker = CreateChunker(maxChunkSize: 10);
+
+        var chunks = chunker.Chunk("one two three\n\nfour five six");
+
+        Assert.Equal(2, chunks.Count);
+        Assert.Equal(0, chunks[0].ChunkIndex);
+        Assert.Equal(1, chunks[1].ChunkIndex);
+    }
+
+    [Fact]
+    public void Chunk_keeps_current_paragraph_baseline()
+    {
+        var chunker = CreateChunker(maxChunkSize: 1200);
+
+        var text = """
+            # Late Payment Policy
+
+            Invoices are due 30 calendar days after the invoice date.
+
+            Late balances may receive a monthly fee after a grace period.
+            """;
+
+        var chunks = chunker.Chunk(text);
+
+        var chunk = Assert.Single(chunks);
+
+        Assert.Equal(0, chunk.ChunkIndex);
+        Assert.Equal("Late Payment Policy", chunk.SectionTitle);
+        Assert.Contains("Invoices are due", chunk.Text);
+        Assert.Contains("monthly fee", chunk.Text);
+    }
+
+    [Fact]
     public async Task IngestPathAsync_creates_document_and_chunks_for_markdown_file()
     {
         using var database = new SqliteTestDatabase();
@@ -38,9 +77,9 @@ public sealed class TextDocumentIngestionTests
 
         try
         {
-            var filePath = Path.Combine(tempDirectory.FullName, "late-payment-policy.md");
+            var filePathOrDirectory = Path.Combine(tempDirectory.FullName, "late-payment-policy.md");
 
-            await File.WriteAllTextAsync(filePath, """
+            await File.WriteAllTextAsync(filePathOrDirectory, """
                 # Late Payment Policy
             
                 Invoices are due 30 calendar days after the invoice date.
@@ -51,11 +90,14 @@ public sealed class TextDocumentIngestionTests
             var searchIndexService = new FakeSearchIndexService();
             var service = new FileSystemDocumentIngestionService(
                 db,
-                new SimpleTextChunker(),
+                CreateChunker(),
                 new FakeDocumentExtractor(),
-                searchIndexService);
+                searchIndexService,
+                CreateChunkingOptions());
 
-            await service.IngestPathAsync(filePath, CancellationToken.None);
+            var run = await CreateIngestionRunAsync(db, filePathOrDirectory);
+
+            await service.IngestPathAsync(run.Id, run.KnowledgeBaseId, run.DataSourceId, filePathOrDirectory, CancellationToken.None);
 
             Assert.NotEmpty(searchIndexService.UpsertedChunks);
             Assert.Contains(searchIndexService.UpsertedChunks, x => x.Text.Contains("Invoices are due"));
@@ -64,7 +106,7 @@ public sealed class TextDocumentIngestionTests
                 .Include(x => x.Chunks)
                 .SingleAsync();
 
-            Assert.Equal(Path.GetFullPath(filePath), document.SourceUri);
+            Assert.Equal(Path.GetFullPath(filePathOrDirectory), document.SourceUri);
             Assert.Equal("late-payment-policy", document.Title);
             Assert.Equal("md", document.SourceType);
             Assert.False(string.IsNullOrWhiteSpace(document.ContentHash));
@@ -88,18 +130,21 @@ public sealed class TextDocumentIngestionTests
 
         try
         {
-            var filePath = Path.Combine(tempDirectory.FullName, "invoice.pdf");
+            var filePathOrDirectory = Path.Combine(tempDirectory.FullName, "invoice.pdf");
 
-            await File.WriteAllBytesAsync(filePath, [1, 2, 3, 4]);
+            await File.WriteAllBytesAsync(filePathOrDirectory, [1, 2, 3, 4]);
 
             var searchIndexService = new FakeSearchIndexService();
             var service = new FileSystemDocumentIngestionService(
                 db,
-                new SimpleTextChunker(),
+                CreateChunker(),
                 new FakeDocumentExtractor(),
-                searchIndexService);
+                searchIndexService,
+                CreateChunkingOptions());
 
-            await service.IngestPathAsync(filePath, CancellationToken.None);
+            var run = await CreateIngestionRunAsync(db, filePathOrDirectory);
+
+            await service.IngestPathAsync(run.Id, run.KnowledgeBaseId, run.DataSourceId, filePathOrDirectory, CancellationToken.None);
 
             Assert.Contains(searchIndexService.UpsertedChunks, x => x.Text.Contains("Total amount due"));
 
@@ -107,7 +152,7 @@ public sealed class TextDocumentIngestionTests
                 .Include(x => x.Chunks)
                 .SingleAsync();
 
-            Assert.Equal(Path.GetFullPath(filePath), document.SourceUri);
+            Assert.Equal(Path.GetFullPath(filePathOrDirectory), document.SourceUri);
             Assert.Equal("invoice", document.Title);
             Assert.Equal("pdf", document.SourceType);
 
@@ -140,9 +185,9 @@ public sealed class TextDocumentIngestionTests
 
         try
         {
-            var filePath = Path.Combine(tempDirectory.FullName, "late-payment-policy.md");
+            var filePathOrDirectory = Path.Combine(tempDirectory.FullName, "late-payment-policy.md");
 
-            await File.WriteAllTextAsync(filePath, """
+            await File.WriteAllTextAsync(filePathOrDirectory, """
                 # Late Payment Policy
 
                 Invoices are due 30 calendar days after the invoice date.
@@ -152,12 +197,15 @@ public sealed class TextDocumentIngestionTests
 
             var service = new FileSystemDocumentIngestionService(
                 db,
-                new SimpleTextChunker(),
+                CreateChunker(),
                 new FakeDocumentExtractor(),
-                searchIndexService);
+                searchIndexService,
+                CreateChunkingOptions());
 
-            await service.IngestPathAsync(filePath, CancellationToken.None);
-            await service.IngestPathAsync(filePath, CancellationToken.None);
+            var run = await CreateIngestionRunAsync(db, filePathOrDirectory);
+
+            await service.IngestPathAsync(run.Id, run.KnowledgeBaseId, run.DataSourceId, filePathOrDirectory, CancellationToken.None);
+            await service.IngestPathAsync(run.Id, run.KnowledgeBaseId, run.DataSourceId, filePathOrDirectory, CancellationToken.None);
 
             var documents = await db.Documents
                 .Include(x => x.Chunks)
@@ -185,9 +233,9 @@ public sealed class TextDocumentIngestionTests
 
         try
         {
-            var filePath = Path.Combine(tempDirectory.FullName, "late-payment-policy.md");
+            var filePathOrDirectory = Path.Combine(tempDirectory.FullName, "late-payment-policy.md");
 
-            await File.WriteAllTextAsync(filePath, """
+            await File.WriteAllTextAsync(filePathOrDirectory, """
                 # Late Payment Policy
 
                 Invoices are due 30 calendar days after the invoice date.
@@ -197,19 +245,22 @@ public sealed class TextDocumentIngestionTests
 
             var service = new FileSystemDocumentIngestionService(
                 db,
-                new SimpleTextChunker(),
+                CreateChunker(),
                 new FakeDocumentExtractor(),
-                searchIndexService);
+                searchIndexService,
+                CreateChunkingOptions());
 
-            await service.IngestPathAsync(filePath, CancellationToken.None);
+            var run = await CreateIngestionRunAsync(db, filePathOrDirectory);
 
-            await File.WriteAllTextAsync(filePath, """
+            await service.IngestPathAsync(run.Id, run.KnowledgeBaseId, run.DataSourceId, filePathOrDirectory, CancellationToken.None);
+
+            await File.WriteAllTextAsync(filePathOrDirectory, """
                 # Late Payment Policy
 
                 Late balances may receive a monthly fee after a grace period.
                 """);
 
-            await service.IngestPathAsync(filePath, CancellationToken.None);
+            await service.IngestPathAsync(run.Id, run.KnowledgeBaseId, run.DataSourceId, filePathOrDirectory, CancellationToken.None);
 
             var document = await db.Documents
                 .Include(x => x.Chunks)
@@ -225,5 +276,194 @@ public sealed class TextDocumentIngestionTests
         {
             tempDirectory.Delete(recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task IngestPathAsync_links_document_to_default_knowledge_base()
+    {
+        using var database = new SqliteTestDatabase();
+        await using var db = database.CreateContext();
+
+        var tempDirectory = Directory.CreateTempSubdirectory("projectrag-kb-ingestion-test-");
+
+        try
+        {
+            var filePathOrDirectory = Path.Combine(tempDirectory.FullName, "late-payment-policy.md");
+
+            await File.WriteAllTextAsync(filePathOrDirectory, """
+              # Late Payment Policy
+
+              Invoices are due 30 calendar days after the invoice date.
+              """);
+
+            var service = new FileSystemDocumentIngestionService(
+                db,
+                CreateChunker(),
+                new FakeDocumentExtractor(),
+                new FakeSearchIndexService(),
+                CreateChunkingOptions());
+
+            var run = await CreateIngestionRunAsync(db, filePathOrDirectory);
+
+            await service.IngestPathAsync(run.Id, run.KnowledgeBaseId, run.DataSourceId, filePathOrDirectory, CancellationToken.None);
+
+            var document = await db.Documents.SingleAsync();
+            var knowledgeBase = await db.KnowledgeBases.SingleAsync();
+
+            Assert.Equal("Default", knowledgeBase.Name);
+            Assert.Equal(knowledgeBase.Id, document.KnowledgeBaseId);
+            Assert.Equal(run.DataSourceId, document.DataSourceId);
+        }
+        finally
+        {
+            tempDirectory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task IngestPathAsync_creates_completed_item_for_each_ingested_file()
+    {
+        using var database = new SqliteTestDatabase();
+        await using var db = database.CreateContext();
+
+        var tempDirectory = Directory.CreateTempSubdirectory("projectrag-ingestion-items-test-");
+
+        try
+        {
+            var firstPath = Path.Combine(tempDirectory.FullName, "one.md");
+            var secondPath = Path.Combine(tempDirectory.FullName, "two.md");
+
+            await File.WriteAllTextAsync(firstPath, "# One\n\nFirst document.");
+            await File.WriteAllTextAsync(secondPath, "# Two\n\nSecond document.");
+
+            var run = await CreateIngestionRunAsync(db, tempDirectory.FullName);
+
+            var service = new FileSystemDocumentIngestionService(
+                db,
+                CreateChunker(),
+                new FakeDocumentExtractor(),
+                new FakeSearchIndexService(),
+                CreateChunkingOptions());
+
+            await service.IngestPathAsync(run.Id, run.KnowledgeBaseId, run.DataSourceId, tempDirectory.FullName, CancellationToken.None);
+
+            var items = await db.IngestionItems
+                .OrderBy(x => x.SourceUri)
+                .ToListAsync();
+
+            Assert.Equal(2, items.Count);
+            Assert.All(items, item => Assert.Equal(run.Id, item.IngestionRunId));
+            Assert.All(items, item => Assert.Equal(IngestionItemStatus.Completed, item.Status));
+            Assert.All(items, item => Assert.NotNull(item.DocumentId));
+            Assert.All(items, item => Assert.NotNull(item.StartedAt));
+            Assert.All(items, item => Assert.NotNull(item.CompletedAt));
+        }
+        finally
+        {
+            tempDirectory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task IngestPathAsync_indexes_chunking_metadata()
+    {
+        using var database = new SqliteTestDatabase();
+        await using var db = database.CreateContext();
+
+        var tempDirectory = Directory.CreateTempSubdirectory("projectrag-chunking-metadata-test-");
+
+        try
+        {
+            var filePathOrDirectory = Path.Combine(tempDirectory.FullName, "late-payment-policy.md");
+
+            await File.WriteAllTextAsync(filePathOrDirectory, """
+                # Late Payment Policy
+
+                Late balances may receive a monthly fee after a grace period.
+                """);
+
+            var searchIndexService = new FakeSearchIndexService();
+            var service = new FileSystemDocumentIngestionService(
+                db,
+                CreateChunker(maxChunkSize: 40),
+                new FakeDocumentExtractor(),
+                searchIndexService,
+                CreateChunkingOptions(maxChunkSize: 40, strategy: "Paragraph"));
+
+            var run = await CreateIngestionRunAsync(db, filePathOrDirectory);
+
+            await service.IngestPathAsync(run.Id, run.KnowledgeBaseId, run.DataSourceId, filePathOrDirectory, CancellationToken.None);
+
+            Assert.NotEmpty(searchIndexService.UpsertedChunks);
+            Assert.All(searchIndexService.UpsertedChunks, chunk =>
+            {
+                Assert.Equal(ChunkingStrategyNames.Paragraph, chunk.ChunkingStrategy);
+                Assert.Equal(40, chunk.ChunkingMaxChunkSize);
+            });
+        }
+        finally
+        {
+            tempDirectory.Delete(recursive: true);
+        }
+    }
+
+    private static async Task<IngestionRun> CreateIngestionRunAsync(RagDbContext db, string sourcePath)
+    {
+        var knowledgeBase = new KnowledgeBase
+        {
+            Id = Guid.NewGuid(),
+            Name = "Default",
+            Description = "Default local knowledge base",
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        var dataSource = new DataSource
+        {
+            Id = Guid.NewGuid(),
+            KnowledgeBaseId = knowledgeBase.Id,
+            Name = Path.GetFileName(sourcePath),
+            SourceType = Directory.Exists(sourcePath) ? "localFolder" : "localFile",
+            SourceUri = Path.GetFullPath(sourcePath),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        var run = new IngestionRun
+        {
+            Id = Guid.NewGuid(),
+            KnowledgeBaseId = knowledgeBase.Id,
+            DataSourceId = dataSource.Id,
+            SourcePath = sourcePath,
+            Status = IngestionRunStatus.Running,
+            CreatedAt = DateTime.UtcNow,
+            StartedAt = DateTime.UtcNow
+        };
+
+        db.KnowledgeBases.Add(knowledgeBase);
+        db.DataSources.Add(dataSource);
+        db.IngestionRuns.Add(run);
+        await db.SaveChangesAsync();
+
+        return run;
+    }
+
+    private static SimpleTextChunker CreateChunker(int maxChunkSize = 1200)
+    {
+        return new SimpleTextChunker(Options.Create(new ChunkingOptions
+        {
+            MaxChunkSize = maxChunkSize
+        }));
+    }
+
+    private static IOptions<ChunkingOptions> CreateChunkingOptions(
+        int maxChunkSize = 1200,
+        string? strategy = null)
+    {
+        return Options.Create(new ChunkingOptions
+        {
+            Strategy = strategy ?? ChunkingStrategyNames.Paragraph,
+            MaxChunkSize = maxChunkSize
+        });
     }
 }

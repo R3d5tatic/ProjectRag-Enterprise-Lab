@@ -1,5 +1,4 @@
 ﻿using Elastic.Clients.Elasticsearch;
-using Elastic.Clients.Elasticsearch.QueryDsl;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
 using ProjectRag.Application.Abstractions;
@@ -15,18 +14,21 @@ internal sealed class ElasticVectorSearchService : IVectorSearchService
     private readonly ElasticsearchClient _client;
     private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingGenerator;
     private readonly ElasticsearchOptions _elasticsearchOptions;
-    private readonly AiOptions _aiOptions;
+    private readonly RetrievalOptions _retrievalOptions;
+    private readonly EmbeddingRuntimeOptions _embeddingOptions;
 
     public ElasticVectorSearchService(
         ElasticsearchClient client,
         IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
         IOptions<ElasticsearchOptions> elasticsearchOptions,
-        IOptions<AiOptions> aiOptions)
+        IOptions<EmbeddingRuntimeOptions> embeddingOptions,
+        IOptions<RetrievalOptions> retrievalOptions)
     {
         _client = client;
         _embeddingGenerator = embeddingGenerator;
         _elasticsearchOptions = elasticsearchOptions.Value;
-        _aiOptions = aiOptions.Value;
+        _embeddingOptions = embeddingOptions.Value;
+        _retrievalOptions = retrievalOptions.Value;
     }
 
     public async Task<IReadOnlyList<SearchHit>> SearchAsync(string query, int topK, SearchFilters? filters, CancellationToken cancellationToken)
@@ -35,7 +37,7 @@ internal sealed class ElasticVectorSearchService : IVectorSearchService
         activity?.SetTag("rag.query.length", query.Length);
         activity?.SetTag("rag.top_k", topK);
         activity?.SetTag("rag.filters.source_type", filters?.SourceType);
-        activity?.SetTag("rag.embedding.model", _aiOptions.EmbeddingModel);
+        activity?.SetTag("rag.embedding.model", _embeddingOptions.Model);
 
         if (string.IsNullOrWhiteSpace(query))
         {
@@ -43,18 +45,12 @@ internal sealed class ElasticVectorSearchService : IVectorSearchService
             return [];
         }
 
-        topK = Math.Clamp(topK, 1, 20);
+        topK = Math.Clamp(topK, 1, _retrievalOptions.MaxCandidateCount);
         activity?.SetTag("rag.top_k.effective", topK);
 
         var queryEmbedding = await _embeddingGenerator.GenerateVectorAsync(query, cancellationToken: cancellationToken);
 
-        var filterQueries = ElasticSearchFilterBuilder.Build(filters);
-
-        filterQueries.Add(new TermQuery
-        {
-            Field = new Field("embeddingModel"),
-            Value = _aiOptions.EmbeddingModel
-        });
+        var filterQueries = ElasticVectorSearchFilterBuilder.Build(filters, _embeddingOptions.Model);
 
         var response = await _client.SearchAsync<ElasticDocumentChunkRecord>(
             descriptor => descriptor

@@ -1,9 +1,11 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using ProjectRag.Application.Abstractions;
 using ProjectRag.Application.Models;
+using ProjectRag.Application.Telemetry;
 using ProjectRag.Domain.Entities;
 using ProjectRag.Domain.Enums;
-using ProjectRag.Application.Telemetry;
+using ProjectRag.Infrastructure.Options;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -19,20 +21,30 @@ internal sealed class FileSystemDocumentIngestionService : ITextDocumentIngestio
     private readonly ITextChunker _chunker;
     private readonly IDocumentExtractor _documentExtractor;
     private readonly ISearchIndexService _searchIndexService;
+    private readonly ChunkingOptions _chunkingOptions;
+
+    private string ChunkingStrategy => ChunkingStrategyNames.Normalize(_chunkingOptions.Strategy);
 
     public FileSystemDocumentIngestionService(
         RagDbContext db,
         ITextChunker chunker,
         IDocumentExtractor documentExtractor,
-        ISearchIndexService searchIndexService)
+        ISearchIndexService searchIndexService,
+        IOptions<ChunkingOptions> chunkingOptions)
     {
         _db = db;
         _chunker = chunker;
         _documentExtractor = documentExtractor;
         _searchIndexService = searchIndexService;
+        _chunkingOptions = chunkingOptions.Value;
     }
 
-    public async Task IngestPathAsync(string sourcePath, CancellationToken cancellationToken)
+    public async Task IngestPathAsync(
+        Guid ingestionRunId,
+        Guid knowledgeBaseId,
+        Guid? dataSourceId,
+        string sourcePath,
+        CancellationToken cancellationToken)
     {
         using var activity = ProjectRagTelemetry.ActivitySource.StartActivity("rag.ingestion");
         activity?.SetTag("rag.source_path.exists_file", File.Exists(sourcePath));
@@ -43,92 +55,142 @@ internal sealed class FileSystemDocumentIngestionService : ITextDocumentIngestio
 
         foreach (var file in files)
         {
-            await IngestFileAsync(file, cancellationToken);
+            await IngestFileAsync(ingestionRunId, knowledgeBaseId, dataSourceId, file, cancellationToken);
         }
     }
 
-    private async Task IngestFileAsync(string filePath, CancellationToken cancellationToken)
+    private async Task IngestFileAsync(
+        Guid ingestionRunId,
+        Guid knowledgeBaseId,
+        Guid? dataSourceId,
+        string filePath,
+        CancellationToken cancellationToken)
     {
         using var activity = ProjectRagTelemetry.ActivitySource.StartActivity("rag.ingestion.file");
         activity?.SetTag("rag.source_type", Path.GetExtension(filePath).TrimStart('.').ToLowerInvariant());
 
-        var contentHash = await ComputeFileHashAsync(filePath, cancellationToken);
-        var extension = Path.GetExtension(filePath);
-
-        var isTextDocument = TextExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase);
-
-        var existing = await _db.Documents
-            .SingleOrDefaultAsync(x => x.SourceUri == filePath, cancellationToken);
-
-        // skip document - content hasn't changed
-        if (existing is not null && existing.ContentHash == contentHash)
+        var item = new IngestionItem
         {
-            var hasIndexedChunks = await _searchIndexService.DocumentHasIndexedChunksAsync(existing.Id, cancellationToken);
+            Id = Guid.NewGuid(),
+            IngestionRunId = ingestionRunId,
+            SourceUri = filePath,
+            Status = IngestionItemStatus.Running,
+            CreatedAt = DateTime.UtcNow,
+            StartedAt = DateTime.UtcNow,
+        };
 
-            if (hasIndexedChunks)
+        try
+        {
+            _db.IngestionItems.Add(item);
+            await _db.SaveChangesAsync(cancellationToken);
+
+            var contentHash = await ComputeFileHashAsync(filePath, cancellationToken);
+            var extension = Path.GetExtension(filePath);
+
+            var isTextDocument = TextExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase);
+
+            var existing = await _db.Documents.SingleOrDefaultAsync(x => x.SourceUri == filePath, cancellationToken); // get existing document
+
+            // skip document - content hasn't changed
+            if (existing is not null && existing.ContentHash == contentHash)
             {
-                activity?.SetTag("rag.ingestion.skipped", true);
-                activity?.SetTag("rag.ingestion.skip_reason", "unchanged");
+                var hasIndexedChunks = await _searchIndexService.DocumentHasIndexedChunksAsync(existing.Id, cancellationToken);
+
+                if (hasIndexedChunks)
+                {
+                    activity?.SetTag("rag.ingestion.skipped", true);
+                    activity?.SetTag("rag.ingestion.skip_reason", "unchanged");
+                    item.DocumentId = existing.Id;
+                    item.Status = IngestionItemStatus.Skipped;
+                    item.CompletedAt = DateTime.UtcNow;
+                    await _db.SaveChangesAsync(cancellationToken);
+                    return;
+                }
+
+                await _db.Entry(existing).Collection(x => x.Chunks).LoadAsync(cancellationToken); // load changes before indexing document chunks
+
+                await IndexDocumentChunksAsync(existing, cancellationToken); // reindex existing document that is missing search index records
+                activity?.SetTag("rag.ingestion.reindexed_existing", true);
+
+                // skip ingestion item
+                item.DocumentId = existing.Id;
+                item.Status = IngestionItemStatus.Skipped;
+                item.CompletedAt = DateTime.UtcNow;
+                await _db.SaveChangesAsync(cancellationToken);
+
                 return;
             }
 
-            await _db.Entry(existing).Collection(x => x.Chunks).LoadAsync(cancellationToken);
+            activity?.SetTag("rag.ingestion.skipped", false);
+            activity?.SetTag("rag.ingestion.is_reingestion", existing is not null);
 
-            await IndexDocumentChunksAsync(existing, cancellationToken); // reindex existing document that is missing search index records
-            activity?.SetTag("rag.ingestion.reindexed_existing", true);
-            return;
-        }
-
-        activity?.SetTag("rag.ingestion.skipped", false);
-        activity?.SetTag("rag.ingestion.is_reingestion", existing is not null);
-
-        // ingest new document or reingest changed document
-        Document document;
-        if (existing is not null)
-        {
-            await _searchIndexService.DeleteDocumentAsync(existing.Id, cancellationToken);
-
-            await _db.DocumentChunks
-                .Where(x => x.DocumentId == existing.Id)
-                .ExecuteDeleteAsync(cancellationToken);
-
-            existing.Title = Path.GetFileNameWithoutExtension(filePath);
-            existing.ContentHash = contentHash;
-            existing.SourceType = Path.GetExtension(filePath).TrimStart('.').ToLowerInvariant();
-            existing.UpdatedAt = DateTime.UtcNow;
-
-            document = existing;
-        }
-        else
-        {
-            document = new Document
+            // ingest new document or reingest changed document
+            Document document;
+            if (existing is not null)
             {
-                Id = Guid.NewGuid(),
-                SourceUri = filePath,
-                Title = Path.GetFileNameWithoutExtension(filePath),
-                ContentHash = contentHash,
-                SourceType = Path.GetExtension(filePath).TrimStart('.').ToLowerInvariant(),
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow,
-            };
+                await _searchIndexService.DeleteDocumentAsync(existing.Id, cancellationToken);
 
-            _db.Documents.Add(document);
+                await _db.DocumentChunks.Where(x => x.DocumentId == existing.Id).ExecuteDeleteAsync(cancellationToken);
+
+                existing.Title = Path.GetFileNameWithoutExtension(filePath);
+                existing.ContentHash = contentHash;
+                existing.SourceType = Path.GetExtension(filePath).TrimStart('.').ToLowerInvariant();
+                existing.KnowledgeBaseId = knowledgeBaseId;
+                existing.DataSourceId = dataSourceId;
+                existing.UpdatedAt = DateTime.UtcNow;
+
+                document = existing;
+            }
+            else
+            {
+                document = new Document
+                {
+                    Id = Guid.NewGuid(),
+                    SourceUri = filePath,
+                    Title = Path.GetFileNameWithoutExtension(filePath),
+                    ContentHash = contentHash,
+                    SourceType = Path.GetExtension(filePath).TrimStart('.').ToLowerInvariant(),
+                    KnowledgeBaseId = knowledgeBaseId,
+                    DataSourceId = dataSourceId,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow,
+                };
+
+                _db.Documents.Add(document);
+            }
+
+            if (isTextDocument)
+            {
+                var text = await File.ReadAllTextAsync(filePath, cancellationToken);
+                AddTextChunks(document, text);
+            }
+            else
+            {
+                await AddExtractedChunksAsync(document, filePath, cancellationToken);
+            }
+
+            await _db.SaveChangesAsync(cancellationToken);
+            activity?.SetTag("rag.chunking.strategy", ChunkingStrategy);
+            activity?.SetTag("rag.chunking.max_chunk_size", _chunkingOptions.MaxChunkSize);
+            activity?.SetTag("rag.chunks.count", document.Chunks.Count);
+
+            item.DocumentId = document.Id;
+
+            await IndexDocumentChunksAsync(document, cancellationToken);
+
+            item.Status = IngestionItemStatus.Completed;
+            item.CompletedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync(cancellationToken);
         }
-
-        if (isTextDocument)
+        catch (Exception ex)
         {
-            var text = await File.ReadAllTextAsync(filePath, cancellationToken);
-            AddTextChunks(document, text);
-        }
-        else
-        {
-            await AddExtractedChunksAsync(document, filePath, cancellationToken);
-        }
+            item.Status = IngestionItemStatus.Failed;
+            item.ErrorMessage = ex.Message;
+            item.CompletedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync(cancellationToken);
 
-        await _db.SaveChangesAsync(cancellationToken);
-        activity?.SetTag("rag.chunks.count", document.Chunks.Count);
-
-        await IndexDocumentChunksAsync(document, cancellationToken);
+            throw;
+        }
     }
 
     private async Task IndexDocumentChunksAsync(Document document, CancellationToken cancellationToken)
@@ -144,7 +206,9 @@ internal sealed class FileSystemDocumentIngestionService : ITextDocumentIngestio
                 chunk.PageNumber,
                 chunk.SectionTitle,
                 chunk.Kind,
-                chunk.CreatedAt))
+                chunk.CreatedAt,
+                ChunkingStrategy,
+                _chunkingOptions.MaxChunkSize))
             .ToList();
 
         await _searchIndexService.UpsertChunksAsync(chunks, cancellationToken);

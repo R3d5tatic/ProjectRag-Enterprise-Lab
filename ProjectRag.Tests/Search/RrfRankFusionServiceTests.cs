@@ -1,35 +1,17 @@
-﻿using ProjectRag.Application.Models;
+using Microsoft.Extensions.Options;
+using ProjectRag.Application.Models;
 using ProjectRag.Domain.Enums;
+using ProjectRag.Infrastructure.Options;
 using ProjectRag.Infrastructure.Search;
 
 namespace ProjectRag.Tests.Search;
 
 public sealed class RrfRankFusionServiceTests
 {
-
-    private static SearchHit Hit(
-        string text,
-        double? vectorScore = null,
-        double? keywordScore = null,
-        Guid? chunkId = null)
-    {
-        return new SearchHit(
-            Guid.NewGuid(),
-            chunkId ?? Guid.NewGuid(),
-            "source.md",
-            text,
-            RrfScore: 0,
-            null,
-            ChunkKind.Paragraph,
-            null,
-            VectorScore: vectorScore,
-            KeywordScore: keywordScore);
-    }
-
     [Fact]
     public async Task FuseAsync_scores_vector_only_result_by_rank()
     {
-        var service = new RrfRankFusionService();
+        var service = CreateService();
 
         var vectorHit = Hit("vector", vectorScore: 0.9);
 
@@ -53,7 +35,7 @@ public sealed class RrfRankFusionServiceTests
     [Fact]
     public async Task FuseAsync_scores_keyword_only_result_by_rank()
     {
-        var service = new RrfRankFusionService();
+        var service = CreateService();
 
         var keywordHit = Hit("keyword", keywordScore: 12);
 
@@ -77,7 +59,7 @@ public sealed class RrfRankFusionServiceTests
     [Fact]
     public async Task FuseAsync_sums_scores_for_same_chunk_from_both_lists()
     {
-        var service = new RrfRankFusionService();
+        var service = CreateService();
 
         var chunkId = Guid.NewGuid();
 
@@ -104,7 +86,7 @@ public sealed class RrfRankFusionServiceTests
     [Fact]
     public async Task FuseAsync_orders_by_rrf_score_descending()
     {
-        var service = new RrfRankFusionService();
+        var service = CreateService();
 
         var hybridChunkId = Guid.NewGuid();
 
@@ -125,7 +107,7 @@ public sealed class RrfRankFusionServiceTests
     [Fact]
     public async Task FuseAsync_respects_topK()
     {
-        var service = new RrfRankFusionService();
+        var service = CreateService();
 
         var results = await service.FuseAsync(
             [
@@ -138,5 +120,50 @@ public sealed class RrfRankFusionServiceTests
             CancellationToken.None);
 
         Assert.Equal(2, results.Count);
+    }
+
+    [Fact]
+    public async Task FuseAsync_uses_configured_rrf_constant()
+    {
+        var service = CreateService(rrfConstant: 10);
+
+        var vectorHit = Hit("vector", vectorScore: 0.9);
+
+        var results = await service.FuseAsync(
+            [vectorHit],
+            [],
+            topK: 5,
+            CancellationToken.None);
+
+        var result = Assert.Single(results);
+
+        Assert.Equal(1d / 11d, result.RrfScore);
+    }
+
+    private static SearchHit Hit(
+        string text,
+        double? vectorScore = null,
+        double? keywordScore = null,
+        Guid? chunkId = null)
+    {
+        return new SearchHit(
+            Guid.NewGuid(),
+            chunkId ?? Guid.NewGuid(),
+            "source.md",
+            text,
+            RrfScore: 0,
+            null,
+            ChunkKind.Paragraph,
+            null,
+            VectorScore: vectorScore,
+            KeywordScore: keywordScore);
+    }
+
+    private static RrfRankFusionService CreateService(int rrfConstant = 60)
+    {
+        return new RrfRankFusionService(Options.Create(new RetrievalOptions
+        {
+            RrfConstant = rrfConstant
+        }));
     }
 }

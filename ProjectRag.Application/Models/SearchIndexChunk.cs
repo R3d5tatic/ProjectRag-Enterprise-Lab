@@ -12,4 +12,6 @@ public sealed record SearchIndexChunk(
     int? PageNumber,
     string? SectionTitle,
     ChunkKind Kind,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    string ChunkingStrategy,
+    int ChunkingMaxChunkSize);

@@ -11,14 +11,17 @@ namespace ProjectRag.Infrastructure.Search;
 internal sealed class ElasticKeywordSearchService : IKeywordSearchService
 {
     private readonly ElasticsearchClient _client;
-    private readonly ElasticsearchOptions _options;
+    private readonly ElasticsearchOptions _elasticSearchOptions;
+    private readonly RetrievalOptions _retrievalOptions;
 
     public ElasticKeywordSearchService(
         ElasticsearchClient client,
-        IOptions<ElasticsearchOptions> options)
+        IOptions<ElasticsearchOptions> elasticSearchOptions,
+        IOptions<RetrievalOptions> retrievalOptions)
     {
         _client = client;
-        _options = options.Value;
+        _elasticSearchOptions = elasticSearchOptions.Value;
+        _retrievalOptions = retrievalOptions.Value;
     }
 
     public async Task<IReadOnlyList<SearchHit>> SearchAsync(string query, int topK, SearchFilters? filters, CancellationToken cancellationToken)
@@ -34,14 +37,14 @@ internal sealed class ElasticKeywordSearchService : IKeywordSearchService
             return [];
         }
 
-        topK = Math.Clamp(topK, 1, 20);
+        topK = Math.Clamp(topK, 1, _retrievalOptions.MaxCandidateCount);
         activity?.SetTag("rag.top_k.effective", topK);
 
         var filterQueries = ElasticSearchFilterBuilder.Build(filters);
 
         var response = await _client.SearchAsync<ElasticDocumentChunkRecord>(
             descriptor => descriptor
-                .Indices(_options.IndexName)
+                .Indices(_elasticSearchOptions.IndexName)
                 .Size(topK)
                 .Query(q => q
                     .Bool(b => b

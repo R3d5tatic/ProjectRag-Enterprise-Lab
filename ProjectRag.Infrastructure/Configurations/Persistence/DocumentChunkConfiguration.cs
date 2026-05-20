@@ -20,7 +20,6 @@ internal sealed class DocumentChunkConfiguration : IEntityTypeConfiguration<Docu
             .HasForeignKey(x => x.DocumentId)
             .OnDelete(DeleteBehavior.Cascade);
 
-        builder.HasIndex(x => new { x.DocumentId, x.ChunkIndex })
-            .IsUnique();
+        builder.HasIndex(x => new { x.DocumentId, x.ChunkIndex }).IsUnique();
     }
 }

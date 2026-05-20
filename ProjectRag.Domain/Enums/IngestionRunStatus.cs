@@ -1,6 +1,6 @@
 ﻿namespace ProjectRag.Domain.Enums;
 
-public enum IngestionJobStatus
+public enum IngestionRunStatus
 {
     Pending = 0,
     Running = 1,

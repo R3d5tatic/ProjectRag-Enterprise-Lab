@@ -2,7 +2,6 @@
 using ProjectRag.Application.Abstractions;
 using ProjectRag.Application.Models;
 using ProjectRag.Application.Telemetry;
-using System.Text.Json;
 
 namespace ProjectRag.Infrastructure.AI;
 
@@ -23,7 +22,8 @@ internal sealed class LlmQueryRewriteService : IQueryRewriteService
         if (string.IsNullOrWhiteSpace(query))
         {
             activity?.SetTag("rag.query_rewrite.status", "fallback");
-            return Fallback(query);
+            activity?.SetTag("rag.query_rewrite.fallback", true);
+            return QueryRewriteResponseParser.Fallback(query).Rewrite;
         }
 
         try
@@ -32,9 +32,11 @@ internal sealed class LlmQueryRewriteService : IQueryRewriteService
                 BuildPrompt(query),
                 cancellationToken: cancellationToken);
 
-            var rewrite = ParseRewrite(query, response.Text);
+            var parseResult = QueryRewriteResponseParser.Parse(query, response.Text);
+            var rewrite = parseResult.Rewrite;
 
             activity?.SetTag("rag.query_rewrite.status", rewrite.Status);
+            activity?.SetTag("rag.query_rewrite.fallback", parseResult.UsedFallback);
             activity?.SetTag("rag.semantic_query.length", rewrite.SemanticQuery.Length);
             activity?.SetTag("rag.keyword_query.length", rewrite.KeywordQuery.Length);
 
@@ -43,31 +45,10 @@ internal sealed class LlmQueryRewriteService : IQueryRewriteService
         catch (Exception ex)
         {
             activity?.SetTag("rag.query_rewrite.status", "fallback");
+            activity?.SetTag("rag.query_rewrite.fallback", true);
             activity?.SetTag("rag.error.type", ex.GetType().Name);
-            return Fallback(query);
+            return QueryRewriteResponseParser.Fallback(query).Rewrite;
         }
-    }
-
-    private static QueryRewrite ParseRewrite(string originalQuery, string responseText)
-    {
-        using var document = JsonDocument.Parse(responseText);
-
-        var root = document.RootElement;
-
-        var semanticQuery = root.TryGetProperty("semanticQuery", out var semanticElement) ? semanticElement.GetString() : null;
-        var keywordQuery = root.TryGetProperty("keywordQuery", out var keywordElement) ? keywordElement.GetString() : null;
-
-        if (string.IsNullOrWhiteSpace(semanticQuery)
-            || string.IsNullOrWhiteSpace(keywordQuery))
-        {
-            return Fallback(originalQuery);
-        }
-
-        return new QueryRewrite(
-            OriginalQuery: originalQuery,
-            SemanticQuery: semanticQuery,
-            KeywordQuery: keywordQuery,
-            Status: "rewritten");
     }
 
     private static string BuildPrompt(string query)
@@ -95,12 +76,4 @@ internal sealed class LlmQueryRewriteService : IQueryRewriteService
             """;
     }
 
-    private static QueryRewrite Fallback(string query)
-    {
-        return new QueryRewrite(
-            OriginalQuery: query,
-            SemanticQuery: query,
-            KeywordQuery: query,
-            Status: "fallback");
-    }
 }

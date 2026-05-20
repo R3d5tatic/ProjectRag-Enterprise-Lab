@@ -1,7 +1,7 @@
 @hostname=localhost
 @port=5260
 @baseUrl=http://{{hostname}}:{{port}}/api/v1
-@ingestionId=cb1cd91a-6c8e-4f70-9ef2-6dffbbe0a52e
+@ingestionId=c2981eab-f389-443a-9353-9d55fc8edeef
 
 ### Health
 GET {{baseUrl}}/health

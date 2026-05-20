@@ -10,10 +10,12 @@ namespace ProjectRag.Tests.Evaluation;
 public sealed class RagEvaluationTests : IClassFixture<RagApiFactory>
 {
     private readonly HttpClient _client;
+    private readonly RagApiFactory _factory;
     private readonly ITestOutputHelper _output;
 
     public RagEvaluationTests(RagApiFactory factory, ITestOutputHelper output)
     {
+        _factory = factory;
         _client = factory.CreateClient();
         _output = output;
     }
@@ -37,7 +39,8 @@ public sealed class RagEvaluationTests : IClassFixture<RagApiFactory>
                 "/api/v1/ingestions",
                 new StartIngestionRequest(tempDirectory.FullName));
 
-            Assert.Equal(HttpStatusCode.Accepted, ingestionResponse.StatusCode);
+            var ingestion = await IngestionApiTestHelper.ReadQueuedIngestionAsync(ingestionResponse);
+            await IngestionApiTestHelper.ProcessQueuedIngestionAsync(_factory, ingestion);
 
             var results = new List<EvalCaseResult>();
 
@@ -125,7 +128,8 @@ public sealed class RagEvaluationTests : IClassFixture<RagApiFactory>
                 "/api/v1/ingestions",
                 new StartIngestionRequest(tempDirectory.FullName));
 
-            Assert.Equal(HttpStatusCode.Accepted, ingestionResponse.StatusCode);
+            var ingestion = await IngestionApiTestHelper.ReadQueuedIngestionAsync(ingestionResponse);
+            await IngestionApiTestHelper.ProcessQueuedIngestionAsync(_factory, ingestion);
 
             var results = new List<EvalCaseResult>();
 

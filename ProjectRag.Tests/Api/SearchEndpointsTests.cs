@@ -8,9 +8,11 @@ namespace ProjectRag.Tests.Api;
 public sealed class SearchEndpointsTests : IClassFixture<RagApiFactory>
 {
     private readonly HttpClient _client;
+    private readonly RagApiFactory _factory;
 
     public SearchEndpointsTests(RagApiFactory factory)
     {
+        _factory = factory;
         _client = factory.CreateClient();
     }
 
@@ -28,7 +30,8 @@ public sealed class SearchEndpointsTests : IClassFixture<RagApiFactory>
                 "/api/v1/ingestions",
                 new StartIngestionRequest(tempDirectory.FullName));
 
-            Assert.Equal(HttpStatusCode.Accepted, ingestionResponse.StatusCode);
+            var ingestion = await IngestionApiTestHelper.ReadQueuedIngestionAsync(ingestionResponse);
+            await IngestionApiTestHelper.ProcessQueuedIngestionAsync(_factory, ingestion);
 
             var searchResponse = await _client.PostAsJsonAsync(
                 "/api/v1/search",
@@ -89,7 +92,8 @@ public sealed class SearchEndpointsTests : IClassFixture<RagApiFactory>
                 "/api/v1/ingestions",
                 new StartIngestionRequest(filePath));
 
-            Assert.Equal(HttpStatusCode.Accepted, ingestionResponse.StatusCode);
+            var ingestion = await IngestionApiTestHelper.ReadQueuedIngestionAsync(ingestionResponse);
+            await IngestionApiTestHelper.ProcessQueuedIngestionAsync(_factory, ingestion);
 
             var searchResponse = await _client.PostAsJsonAsync(
                 "/api/v1/search",
@@ -147,7 +151,8 @@ public sealed class SearchEndpointsTests : IClassFixture<RagApiFactory>
                 "/api/v1/ingestions",
                 new StartIngestionRequest(tempDirectory.FullName));
 
-            Assert.Equal(HttpStatusCode.Accepted, ingestionResponse.StatusCode);
+            var ingestion = await IngestionApiTestHelper.ReadQueuedIngestionAsync(ingestionResponse);
+            await IngestionApiTestHelper.ProcessQueuedIngestionAsync(_factory, ingestion);
 
             var searchResponse = await _client.PostAsJsonAsync(
                 "/api/v1/search",

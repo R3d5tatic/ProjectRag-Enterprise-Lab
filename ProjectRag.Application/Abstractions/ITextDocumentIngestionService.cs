@@ -2,5 +2,10 @@
 
 public interface ITextDocumentIngestionService
 {
-    Task IngestPathAsync(string sourcePath, CancellationToken cancellationToken);
+    Task IngestPathAsync(
+        Guid ingestionRunId,
+        Guid knowledgeBaseId,
+        Guid? dataSourceId,
+        string sourcePath,
+        CancellationToken cancellationToken);
 }

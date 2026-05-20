@@ -14,6 +14,7 @@ ProjectRag stops at Phase 9 as a learning-focused RAG baseline. The notes below 
 - Move ingestion out of the request path.
   - Current `/ingestions` work runs inline and can exceed client timeouts.
   - Use the worker project, a background queue, or another durable job mechanism.
+  - Phase 0 now has `IngestionRun` and `IngestionItem` records, so async ingestion should reuse these entities instead of introducing a separate job model.
 - Add bulk indexing for Elasticsearch.
   - Current indexing is chunk-by-chunk.
   - Bulk indexing should reduce ingestion latency and partial-failure noise.
@@ -29,7 +30,8 @@ ProjectRag stops at Phase 9 as a learning-focused RAG baseline. The notes below 
 
 - Compare application-level RRF with Elasticsearch native RRF.
   - Current RRF is implemented in .NET for learning and provider neutrality.
-  - The fork can evaluate provider-native RRF as an optimization.
+  - Elasticsearch-native RRF is now an opt-in adapter path for comparison.
+  - Keep application-level RRF as the default baseline until evals justify changing it.
 - Compare reranking options.
   - Current reranking uses a local chat model and is intentionally educational.
   - Evaluate Elasticsearch native reranking, Azure AI Search semantic ranker, local ONNX cross-encoders, and dedicated reranker models.
@@ -89,12 +91,22 @@ ProjectRag stops at Phase 9 as a learning-focused RAG baseline. The notes below 
 - Compare chunking strategies with the eval harness.
   - Current text chunking is paragraph-based.
   - Current scanned document chunking is layout-aware and rule-based.
+- Keep `ITextChunker` as the Application boundary.
+  - Docling, Microsoft chunking packages, token-aware splitting, recursive splitting, and semantic chunking should be Infrastructure adapters.
+  - Do not change Domain/API contracts for an experiment unless evals show the strategy should become product behavior.
+- Use indexed chunking metadata when comparing experiments.
+  - Current indexed metadata includes chunking strategy and max chunk size.
+  - Add a persisted `ChunkingProfile` only when selectable/reusable chunking configurations are needed.
 - Candidate strategies:
   - token-aware chunking
   - overlapping chunks
   - recursive splitting
   - semantic chunking
   - table-preserving scanned-document chunks
+- Optional Docling spike:
+  - Run Docling as a separate Python service or offline experiment first.
+  - Map results back into ProjectRag chunk models instead of leaking Docling types into Domain or Contracts.
+  - Compare retrieval hit rate, citation correctness, answer status, chunk count, and ingestion latency against the paragraph/layout baseline.
 - Measure impact before changing defaults.
   - Judge chunking changes by retrieval hit rate, citation correctness, answer groundedness, and latency.
 

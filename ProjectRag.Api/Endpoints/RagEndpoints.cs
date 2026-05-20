@@ -3,8 +3,6 @@ using ProjectRag.Application.Abstractions;
 using ProjectRag.Application.Models;
 using ProjectRag.Application.Telemetry;
 using ProjectRag.Contracts;
-using ProjectRag.Domain.Entities;
-using ProjectRag.Domain.Enums;
 using ProjectRag.Infrastructure;
 
 namespace ProjectRag.Api.Endpoints;
@@ -23,73 +21,23 @@ internal static class RagEndpoints
 
         group.MapPost("/ingestions", async (
             StartIngestionRequest request,
-            RagDbContext db,
-            ITextDocumentIngestionService ingestionService,
+            IIngestionRunQueueService ingestionRunQueueService,
             CancellationToken cancellationToken) =>
         {
-            var job = new IngestionJob
-            {
-                Id = Guid.NewGuid(),
-                SourcePath = request.SourcePath,
-                Status = IngestionJobStatus.Pending,
-                CreatedAt = DateTime.UtcNow
-            };
 
-            db.IngestionJobs.Add(job);
+            var result = await ingestionRunQueueService.QueueAsync(request.SourcePath, cancellationToken);
 
-            try
-            {
-                job.Status = IngestionJobStatus.Running;
-                job.StartedAt = DateTime.UtcNow;
-                await db.SaveChangesAsync(cancellationToken);
-
-                await ingestionService.IngestPathAsync(job.SourcePath, cancellationToken);
-
-                job.Status = IngestionJobStatus.Completed;
-                job.CompletedAt = DateTime.UtcNow;
-                await db.SaveChangesAsync(cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                job.Status = IngestionJobStatus.Failed;
-                job.ErrorMessage = ex.Message;
-                job.CompletedAt = DateTime.UtcNow;
-                await db.SaveChangesAsync(cancellationToken);
-            }
-
-            return Results.Accepted($"/api/v1/ingestions/{job.Id}", new IngestionJobResponse
-            (
-                job.Id,
-                job.SourcePath,
-                job.Status.ToString(),
-                job.ErrorMessage,
-                job.CreatedAt,
-                job.StartedAt,
-                job.CompletedAt
-            ));
+            return Results.Accepted($"/api/v1/ingestions/{result.IngestionId}", ToIngestionRunResponse(result));
         });
 
         group.MapGet("/ingestions/{id:guid}", async (
             Guid id,
-            RagDbContext db,
+            IIngestionRunQueueService ingestionRunQueueService,
             CancellationToken cancellationToken) =>
         {
-            var job = await db.IngestionJobs
-                .AsNoTracking()
-                .Where(x => x.Id == id)
-                .Select(x => new IngestionJobResponse
-                (
-                    x.Id,
-                    x.SourcePath,
-                    x.Status.ToString(),
-                    x.ErrorMessage,
-                    x.CreatedAt,
-                    x.StartedAt,
-                    x.CompletedAt
-                ))
-                .SingleOrDefaultAsync(cancellationToken);
+            var result = await ingestionRunQueueService.GetAsync(id, cancellationToken);
 
-            return job is null ? Results.NotFound() : Results.Ok(job);
+            return result is null ? Results.NotFound() : Results.Ok(ToIngestionRunResponse(result));
         });
 
         group.MapGet("/documents", async (
@@ -220,16 +168,50 @@ internal static class RagEndpoints
                     x.SectionTitle)).ToList(),
                 new RetrievalDiagnosticsResponse(
                     answer.RetrievalDiagnostics.RequestedTopK,
+                    answer.RetrievalDiagnostics.CandidateCount,
                     answer.RetrievalDiagnostics.ReturnedContextCount,
-                    answer.RetrievalDiagnostics.RerankingApplied),
+                    answer.RetrievalDiagnostics.RerankingApplied,
+                    answer.RetrievalDiagnostics.RetrievalMode,
+                    answer.RetrievalDiagnostics.FusionMode,
+                    answer.RetrievalDiagnostics.RerankerMode,
+                    answer.RetrievalDiagnostics.RrfConstant),
                 new ModelInfoResponse(
                     answer.ModelInfo.ChatProvider,
                     answer.ModelInfo.ChatModel,
+                    answer.ModelInfo.EmbeddingProvider,
                     answer.ModelInfo.EmbeddingModel));
 
             return Results.Ok(response);
         });
 
         return group;
+    }
+
+    private static IngestionRunResponse ToIngestionRunResponse(IngestionRunResult run)
+    {
+        return new IngestionRunResponse(
+            run.IngestionId,
+            run.KnowledgeBaseId,
+            run.DataSourceId,
+            run.SourcePath,
+            run.Status,
+            run.ErrorMessage,
+            run.CreatedAt,
+            run.StartedAt,
+            run.CompletedAt,
+            new IngestionRunSummaryResponse(
+                run.Summary.TotalItems,
+                run.Summary.CompletedItems,
+                run.Summary.FailedItems,
+                run.Summary.SkippedItems),
+            run.Items.Select(x => new IngestionItemResponse(
+                x.IngestionItemId,
+                x.DocumentId,
+                x.SourceUri,
+                x.Status,
+                x.ErrorMessage,
+                x.CreatedAt,
+                x.StartedAt,
+                x.CompletedAt)).ToList());
     }
 }

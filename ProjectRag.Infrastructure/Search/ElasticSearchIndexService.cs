@@ -1,4 +1,5 @@
 ﻿using Elastic.Clients.Elasticsearch;
+using Elastic.Clients.Elasticsearch.IndexManagement;
 using Elastic.Clients.Elasticsearch.Mapping;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
@@ -13,18 +14,18 @@ internal sealed class ElasticSearchIndexService : ISearchIndexService
     private readonly ElasticsearchClient _client;
     private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingGenerator;
     private readonly ElasticsearchOptions _elasticsearchOptions;
-    private readonly AiOptions _aiOptions;
+    private readonly EmbeddingRuntimeOptions _embeddingOptions;
 
     public ElasticSearchIndexService(
         ElasticsearchClient client,
         IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
         IOptions<ElasticsearchOptions> elasticsearchOptions,
-        IOptions<AiOptions> aiOptions)
+        IOptions<EmbeddingRuntimeOptions> embeddingOptions)
     {
         _client = client;
         _embeddingGenerator = embeddingGenerator;
         _elasticsearchOptions = elasticsearchOptions.Value;
-        _aiOptions = aiOptions.Value;
+        _embeddingOptions = embeddingOptions.Value;
     }
 
     public async Task DeleteDocumentAsync(Guid documentId, CancellationToken cancellationToken)
@@ -90,21 +91,10 @@ internal sealed class ElasticSearchIndexService : ISearchIndexService
                 throw new InvalidOperationException($"Expected {ElasticDocumentChunkRecord.EmbeddingDimensions} embedding dimensions, but got {embedding.Dimensions}.");
             }
 
-            var record = new ElasticDocumentChunkRecord
-            {
-                ChunkId = chunk.ChunkId.ToString(),
-                DocumentId = chunk.DocumentId.ToString(),
-                SourceUri = chunk.SourceUri,
-                SourceType = chunk.SourceType,
-                Title = chunk.Title,
-                Text = chunk.Text,
-                PageNumber = chunk.PageNumber,
-                SectionTitle = chunk.SectionTitle,
-                Kind = chunk.Kind.ToString(),
-                CreatedAt = chunk.CreatedAt,
-                EmbeddingModel = _aiOptions.EmbeddingModel,
-                Embedding = embedding.Vector
-            };
+            var record = ElasticDocumentChunkRecordMapper.Map(
+                chunk,
+                embedding,
+                _embeddingOptions.Model);
 
             var response = await _client.IndexAsync(
                 record,
@@ -129,7 +119,26 @@ internal sealed class ElasticSearchIndexService : ISearchIndexService
             return;
         }
 
-        var createResponse = await _client.Indices.CreateAsync<ElasticDocumentChunkRecord>(
+        CreateIndexResponse createResponse;
+
+        if (_elasticsearchOptions.EnableSemanticTextRetrieval)
+        {
+            createResponse = await CreateIndexWithSemanticTextAsync(cancellationToken);
+        }
+        else
+        {
+            createResponse = await CreateIndexWithoutSemanticTextAsync(cancellationToken);
+        }
+
+        if (!createResponse.IsValidResponse)
+        {
+            throw new InvalidOperationException($"Failed to create Elasticsearch index '{_elasticsearchOptions.IndexName}'.");
+        }
+    }
+
+    private Task<CreateIndexResponse> CreateIndexWithoutSemanticTextAsync(CancellationToken cancellationToken)
+    {
+        return _client.Indices.CreateAsync<ElasticDocumentChunkRecord>(
             descriptor => descriptor
                 .Index(_elasticsearchOptions.IndexName)
                 .Mappings(mapping => mapping
@@ -144,15 +153,40 @@ internal sealed class ElasticSearchIndexService : ISearchIndexService
                         .Text(x => x.SectionTitle)
                         .Keyword(x => x.Kind)
                         .Date(x => x.CreatedAt)
+                        .Keyword(x => x.ChunkingStrategy)
+                        .IntegerNumber(x => x.ChunkingMaxChunkSize)
                         .Keyword(x => x.EmbeddingModel)
                         .DenseVector(x => x.Embedding, vector => vector
                             .Dims(ElasticDocumentChunkRecord.EmbeddingDimensions)
                             .Similarity(DenseVectorSimilarity.Cosine)))),
             cancellationToken);
+    }
 
-        if (!createResponse.IsValidResponse)
-        {
-            throw new InvalidOperationException($"Failed to create Elasticsearch index '{_elasticsearchOptions.IndexName}'.");
-        }
+    private Task<CreateIndexResponse> CreateIndexWithSemanticTextAsync(CancellationToken cancellationToken)
+    {
+        return _client.Indices.CreateAsync<ElasticDocumentChunkRecord>(
+            descriptor => descriptor
+                .Index(_elasticsearchOptions.IndexName)
+                .Mappings(mapping => mapping
+                    .Properties(properties => properties
+                        .Keyword(x => x.ChunkId)
+                        .Keyword(x => x.DocumentId)
+                        .Keyword(x => x.SourceUri)
+                        .Keyword(x => x.SourceType)
+                        .Text(x => x.Title)
+                        .Text(x => x.Text)
+                        .SemanticText(x => x.SemanticText, semantic => semantic
+                            .InferenceId(_elasticsearchOptions.SemanticTextInferenceId!))
+                        .IntegerNumber(x => x.PageNumber)
+                        .Text(x => x.SectionTitle)
+                        .Keyword(x => x.Kind)
+                        .Date(x => x.CreatedAt)
+                        .Keyword(x => x.ChunkingStrategy)
+                        .IntegerNumber(x => x.ChunkingMaxChunkSize)
+                        .Keyword(x => x.EmbeddingModel)
+                        .DenseVector(x => x.Embedding, vector => vector
+                            .Dims(ElasticDocumentChunkRecord.EmbeddingDimensions)
+                            .Similarity(DenseVectorSimilarity.Cosine)))),
+            cancellationToken);
     }
 }

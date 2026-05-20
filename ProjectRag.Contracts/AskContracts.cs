@@ -20,12 +20,18 @@ public sealed record ClaimResponse(
 
 public sealed record RetrievalDiagnosticsResponse(
     int RequestedTopK,
+    int CandidateCount,
     int ReturnedContextCount,
-    bool RerankingApplied);
+    bool RerankingApplied,
+    string RetrievalMode,
+    string FusionMode,
+    string RerankerMode,
+    int RrfConstant);
 
 public sealed record ModelInfoResponse(
     string ChatProvider,
     string ChatModel,
+    string EmbeddingProvider,
     string EmbeddingModel);
 
 public sealed record CitationResponse(

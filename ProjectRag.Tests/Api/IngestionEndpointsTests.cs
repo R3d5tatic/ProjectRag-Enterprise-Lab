@@ -1,4 +1,4 @@
-﻿using ProjectRag.Contracts;
+using ProjectRag.Contracts;
 using ProjectRag.Tests.Support;
 using System.Net;
 using System.Net.Http.Json;
@@ -8,13 +8,14 @@ namespace ProjectRag.Tests.Api;
 public sealed class IngestionEndpointsTests : IClassFixture<RagApiFactory>
 {
     private readonly HttpClient _client;
+
     public IngestionEndpointsTests(RagApiFactory factory)
     {
         _client = factory.CreateClient();
     }
 
     [Fact]
-    public async Task PostIngestion_ingests_markdown_file_and_completes_job()
+    public async Task PostIngestion_queues_ingestion_run()
     {
         var tempDirectory = Directory.CreateTempSubdirectory("projectrag-api-ingestion-test-");
 
@@ -34,16 +35,26 @@ public sealed class IngestionEndpointsTests : IClassFixture<RagApiFactory>
 
             Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 
-            var body = await response.Content.ReadFromJsonAsync<IngestionJobResponse>();
+            var body = await response.Content.ReadFromJsonAsync<IngestionRunResponse>();
 
             Assert.NotNull(body);
 
             Assert.NotEqual(Guid.Empty, body.IngestionId);
+            Assert.NotEqual(Guid.Empty, body.KnowledgeBaseId);
+            Assert.NotNull(body.DataSourceId);
+            Assert.NotEqual(Guid.Empty, body.DataSourceId.Value);
             Assert.Equal(filePath, body.SourcePath);
 
-            Assert.Equal("Completed", body.Status);
-            Assert.NotNull(body.StartedAt);
-            Assert.NotNull(body.CompletedAt);
+            Assert.Equal("Pending", body.Status);
+            Assert.Null(body.StartedAt);
+            Assert.Null(body.CompletedAt);
+
+            Assert.NotNull(body.Summary);
+            Assert.Equal(0, body.Summary.TotalItems);
+            Assert.Equal(0, body.Summary.CompletedItems);
+            Assert.Equal(0, body.Summary.FailedItems);
+            Assert.Equal(0, body.Summary.SkippedItems);
+            Assert.Empty(body.Items);
         }
         finally
         {
@@ -52,7 +63,7 @@ public sealed class IngestionEndpointsTests : IClassFixture<RagApiFactory>
     }
 
     [Fact]
-    public async Task GetIngestion_returns_created_job()
+    public async Task GetIngestion_returns_created_run()
     {
         var tempDirectory = Directory.CreateTempSubdirectory("projectrag-api-ingestion-test-");
 
@@ -70,7 +81,7 @@ public sealed class IngestionEndpointsTests : IClassFixture<RagApiFactory>
                 "/api/v1/ingestions",
                 new StartIngestionRequest(filePath));
 
-            var created = await createResponse.Content.ReadFromJsonAsync<IngestionJobResponse>();
+            var created = await createResponse.Content.ReadFromJsonAsync<IngestionRunResponse>();
 
             Assert.NotNull(created);
 
@@ -78,38 +89,20 @@ public sealed class IngestionEndpointsTests : IClassFixture<RagApiFactory>
 
             Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
 
-            var fetched = await getResponse.Content.ReadFromJsonAsync<IngestionJobResponse>();
+            var fetched = await getResponse.Content.ReadFromJsonAsync<IngestionRunResponse>();
 
             Assert.NotNull(fetched);
 
             Assert.Equal(created.IngestionId, fetched.IngestionId);
+            Assert.Equal(created.KnowledgeBaseId, fetched.KnowledgeBaseId);
+            Assert.Equal(created.DataSourceId, fetched.DataSourceId);
             Assert.Equal(filePath, fetched.SourcePath);
 
-            Assert.Equal("Completed", fetched.Status);
-        }
-        finally
-        {
-            tempDirectory.Delete(recursive: true);
-        }
-    }
-
-    [Fact]
-    public async Task GetDocuments_returns_ingested_documents()
-    {
-        var tempDirectory = Directory.CreateTempSubdirectory("projectrag-api-ingestion-test-");
-
-        try
-        {
-            SampleDocsTestHelper.CopySampleDocs(tempDirectory.FullName);
-
-            await _client.PostAsJsonAsync(
-                "/api/v1/ingestions",
-                new StartIngestionRequest(tempDirectory.FullName));
-
-            var documents = await _client.GetFromJsonAsync<IReadOnlyList<DocumentSummaryResponse>>("/api/v1/documents");
-
-            Assert.NotNull(documents);
-            Assert.Contains(documents, x => x.Title == "refund-policy");
+            Assert.Equal("Pending", fetched.Status);
+            Assert.Empty(fetched.Items);
+            Assert.NotNull(fetched.Summary);
+            Assert.Equal(0, fetched.Summary.TotalItems);
+            Assert.Equal(fetched.Summary.TotalItems, fetched.Items.Count);
         }
         finally
         {

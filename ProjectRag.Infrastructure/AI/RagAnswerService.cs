@@ -4,24 +4,30 @@ using ProjectRag.Application.Abstractions;
 using ProjectRag.Application.Models;
 using ProjectRag.Application.Telemetry;
 using ProjectRag.Infrastructure.Options;
-using System.Text.Json;
+using System.Diagnostics;
 
 namespace ProjectRag.Infrastructure.AI;
 
 internal sealed class RagAnswerService : IRagAnswerService
 {
-    private readonly AiOptions _aiOptions;
+    private readonly ChatRuntimeOptions _chatOptions;
+    private readonly EmbeddingRuntimeOptions _embeddingOptions;
+    private readonly RetrievalOptions _retrievalOptions;
 
     private readonly IRetrievalSearchService _retrievalSearchService;
     private readonly IChatClient _chatClient;
     private readonly IQueryRewriteService _queryRewriteService;
     public RagAnswerService(
-        IOptions<AiOptions> aiOptions,
+        IOptions<ChatRuntimeOptions> chatOptions,
+        IOptions<EmbeddingRuntimeOptions> embeddingOptions,
+        IOptions<RetrievalOptions> retrievalOptions,
         IRetrievalSearchService retrievalSearchService,
         IChatClient chatClient,
         IQueryRewriteService queryRewriteService)
     {
-        _aiOptions = aiOptions.Value;
+        _chatOptions = chatOptions.Value;
+        _embeddingOptions = embeddingOptions.Value;
+        _retrievalOptions = retrievalOptions.Value;
         _retrievalSearchService = retrievalSearchService;
         _chatClient = chatClient;
         _queryRewriteService = queryRewriteService;
@@ -44,16 +50,16 @@ internal sealed class RagAnswerService : IRagAnswerService
             activity?.SetTag("rag.answer.status", "insufficientContext");
             activity?.SetTag("rag.context.count", 0);
 
+            var diagnostics = BuildRetrievalDiagnostics(topK, []);
+            SetRetrievalDiagnosticTags(activity, diagnostics);
+
             return new RagAnswer(
                 Answer: "Please provide a question",
                 AnswerStatus: "insufficientContext",
                 QueryRewrite: queryRewrite,
                 Claims: [],
                 Citations: [],
-                RetrievalDiagnostics: new RetrievalDiagnostics(
-                    RequestedTopK: topK,
-                    ReturnedContextCount: 0,
-                    RerankingApplied: false),
+                RetrievalDiagnostics: diagnostics,
                 ModelInfo: BuildModelInfo());
         }
 
@@ -73,13 +79,16 @@ internal sealed class RagAnswerService : IRagAnswerService
         if (hits.Count == 0)
         {
             activity?.SetTag("rag.answer.status", "insufficientContext");
+            var diagnostics = BuildRetrievalDiagnostics(topK, hits);
+            SetRetrievalDiagnosticTags(activity, diagnostics);
+
             return new RagAnswer(
                 Answer: "I do not have enough information in the available documents to answer that question.",
                 AnswerStatus: "insufficientContext",
                 QueryRewrite: queryRewrite,
                 Claims: [],
                 Citations: [],
-                RetrievalDiagnostics: BuildRetrievalDiagnostics(topK, hits),
+                RetrievalDiagnostics: diagnostics,
                 ModelInfo: BuildModelInfo());
         }
 
@@ -127,9 +136,10 @@ internal sealed class RagAnswerService : IRagAnswerService
 
         var response = await _chatClient.GetResponseAsync(prompt, cancellationToken: cancellationToken);
 
-        var parsedAnswer = ParseAnswerResponse(response.Text, hits);
+        var parsedAnswer = RagAnswerResponseParser.Parse(response.Text, hits);
 
         generationActivity?.SetTag("rag.answer.status", parsedAnswer.AnswerStatus);
+        generationActivity?.SetTag("rag.answer.parse_fallback", parsedAnswer.UsedFallback);
         generationActivity?.SetTag("rag.claims.count", parsedAnswer.Claims.Count);
 
         var citations = hits
@@ -149,8 +159,12 @@ internal sealed class RagAnswerService : IRagAnswerService
             .ToList();
 
         activity?.SetTag("rag.answer.status", parsedAnswer.AnswerStatus);
+        activity?.SetTag("rag.answer.parse_fallback", parsedAnswer.UsedFallback);
         activity?.SetTag("rag.claims.count", parsedAnswer.Claims.Count);
         activity?.SetTag("rag.citations.count", citations.Count);
+
+        var finalDiagnostics = BuildRetrievalDiagnostics(topK, hits);
+        SetRetrievalDiagnosticTags(activity, finalDiagnostics);
 
         return new RagAnswer(
             Answer: parsedAnswer.Answer,
@@ -158,120 +172,8 @@ internal sealed class RagAnswerService : IRagAnswerService
             QueryRewrite: queryRewrite,
             Claims: parsedAnswer.Claims,
             Citations: citations,
-            RetrievalDiagnostics: BuildRetrievalDiagnostics(topK, hits),
+            RetrievalDiagnostics: finalDiagnostics,
             ModelInfo: BuildModelInfo());
-    }
-
-    private sealed record ParsedAnswer(
-        string Answer,
-        string AnswerStatus,
-        IReadOnlyList<AnswerClaim> Claims);
-
-    private static ParsedAnswer ParseAnswerResponse(string responseText, IReadOnlyList<SearchHit> hits)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(ExtractJsonObject(responseText));
-            var root = document.RootElement;
-
-            var answerStatus = root.TryGetProperty("answerStatus", out var statusElement) ? statusElement.GetString() : null;
-
-            var answer = root.TryGetProperty("answer", out var answerElement) ? answerElement.GetString() : null;
-
-            if (answerStatus is not ("answered" or "insufficientContext")
-                || string.IsNullOrWhiteSpace(answer))
-            {
-                return InsufficientContext();
-            }
-
-            if (answerStatus == "insufficientContext")
-            {
-                return new ParsedAnswer(
-                    Answer: answer,
-                    AnswerStatus: "insufficientContext",
-                    Claims: []);
-            }
-
-            var claims = ParseClaims(root, hits);
-
-            if (claims.Count == 0)
-            {
-                return InsufficientContext();
-            }
-
-            return new ParsedAnswer(
-                Answer: answer,
-                AnswerStatus: "answered",
-                Claims: claims);
-        }
-        catch (Exception)
-        {
-            return InsufficientContext();
-        }
-    }
-
-    private static IReadOnlyList<AnswerClaim> ParseClaims(JsonElement root, IReadOnlyList<SearchHit> hits)
-    {
-        if (!root.TryGetProperty("claims", out var claimsElement)
-            || claimsElement.ValueKind is not JsonValueKind.Array)
-        {
-            return [];
-        }
-
-        var claims = new List<AnswerClaim>();
-
-        foreach (var claimElement in claimsElement.EnumerateArray())
-        {
-            if (!claimElement.TryGetProperty("text", out var textElement)
-                || !claimElement.TryGetProperty("sourceIndexes", out var sourceIndexesElement)
-                || sourceIndexesElement.ValueKind is not JsonValueKind.Array)
-            {
-                continue;
-            }
-
-            var text = textElement.GetString();
-
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                continue;
-            }
-
-            var citationChunkIds = sourceIndexesElement
-                .EnumerateArray()
-                .Where(x => x.ValueKind == JsonValueKind.Number)
-                .Select(x => x.GetInt32())
-                .Where(index => index >= 1 && index <= hits.Count)
-                .Select(index => hits[index - 1].ChunkId)
-                .Distinct()
-                .ToList();
-
-            if (citationChunkIds.Count == 0)
-            {
-                continue;
-            }
-
-            claims.Add(new AnswerClaim(text, citationChunkIds));
-        }
-
-        return claims;
-    }
-
-    private static ParsedAnswer InsufficientContext()
-    {
-        return new ParsedAnswer(
-            Answer: "I do not have enough information in the available documents to answer that question.",
-            AnswerStatus: "insufficientContext",
-            Claims: []);
-    }
-
-    private static string ExtractJsonObject(string responseText)
-    {
-        var start = responseText.IndexOf('{');
-        var end = responseText.LastIndexOf('}');
-
-        return start >= 0 && end > start
-            ? responseText[start..(end + 1)]
-            : responseText;
     }
 
     private static string BuildContext(IReadOnlyList<SearchHit> hits)
@@ -296,18 +198,42 @@ internal sealed class RagAnswerService : IRagAnswerService
     private ModelInfo BuildModelInfo()
     {
         return new ModelInfo(
-            ChatProvider: "Ollama",
-            ChatModel: _aiOptions.ChatModel,
-            EmbeddingModel: _aiOptions.EmbeddingModel);
+            ChatProvider: _chatOptions.Provider,
+            ChatModel: _chatOptions.Model,
+            EmbeddingProvider: _embeddingOptions.Provider,
+            EmbeddingModel: _embeddingOptions.Model);
     }
 
-    private static RetrievalDiagnostics BuildRetrievalDiagnostics(
+    private RetrievalDiagnostics BuildRetrievalDiagnostics(
         int requestedTopK,
         IReadOnlyList<SearchHit> hits)
     {
+        var rerankingApplied = hits.Any(hit => hit.RerankScore.HasValue);
+
         return new RetrievalDiagnostics(
             RequestedTopK: requestedTopK,
+            CandidateCount: _retrievalOptions.CandidateCount,
             ReturnedContextCount: hits.Count,
-            RerankingApplied: hits.Any(hit => hit.RerankScore.HasValue));
+            RerankingApplied: rerankingApplied,
+            RetrievalMode: _retrievalOptions.RetrievalMode,
+            FusionMode: _retrievalOptions.FusionMode,
+            RerankerMode: _retrievalOptions.EnableReranking
+                ? _retrievalOptions.RerankerMode
+                : RetrievalStrategyNames.NoReranker,
+            RrfConstant: _retrievalOptions.RrfConstant);
+    }
+
+    private static void SetRetrievalDiagnosticTags(
+        Activity? activity,
+        RetrievalDiagnostics diagnostics)
+    {
+        activity?.SetTag("rag.retrieval.requested_top_k", diagnostics.RequestedTopK);
+        activity?.SetTag("rag.retrieval.candidate_count", diagnostics.CandidateCount);
+        activity?.SetTag("rag.retrieval.returned_context_count", diagnostics.ReturnedContextCount);
+        activity?.SetTag("rag.retrieval.reranking_applied", diagnostics.RerankingApplied);
+        activity?.SetTag("rag.retrieval.mode", diagnostics.RetrievalMode);
+        activity?.SetTag("rag.retrieval.fusion_mode", diagnostics.FusionMode);
+        activity?.SetTag("rag.retrieval.reranker_mode", diagnostics.RerankerMode);
+        activity?.SetTag("rag.retrieval.rrf_constant", diagnostics.RrfConstant);
     }
 }

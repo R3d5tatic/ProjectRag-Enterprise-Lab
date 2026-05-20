@@ -5,7 +5,6 @@ using ProjectRag.Application.Models;
 using ProjectRag.Infrastructure.Options;
 using ProjectRag.Application.Telemetry;
 using System.Text;
-using System.Text.Json;
 
 namespace ProjectRag.Infrastructure.AI;
 
@@ -42,16 +41,17 @@ internal sealed class LlmRerankerService : IRerankerService
         {
             var response = await _chatClient.GetResponseAsync(BuildPrompt(query, candidates), cancellationToken: cancellationToken);
 
-            var results = ApplyScores(candidates, response.Text, topK);
+            var parseResult = RerankResponseParser.Parse(candidates, response.Text, topK);
+            var results = parseResult.Results;
 
             activity?.SetTag("rag.results.count", results.Count);
-            activity?.SetTag("rag.rerank.fallback", false);
+            activity?.SetTag("rag.rerank.fallback", parseResult.UsedFallback);
 
             return results;
         }
         catch (Exception ex)
         {
-            var fallbackResults = candidates.Take(topK).ToList();
+            var fallbackResults = RerankResponseParser.Fallback(candidates, topK).Results;
 
             activity?.SetTag("rag.results.count", fallbackResults.Count);
             activity?.SetTag("rag.rerank.fallback", true);
@@ -59,56 +59,6 @@ internal sealed class LlmRerankerService : IRerankerService
 
             return fallbackResults;
         }
-    }
-
-    private static IReadOnlyList<SearchHit> ApplyScores(IReadOnlyList<SearchHit> candidates, string responseText, int topK)
-    {
-        using var document = JsonDocument.Parse(responseText);
-
-        if (!document.RootElement.TryGetProperty("scores", out var scoresElement)
-            || scoresElement.ValueKind is not JsonValueKind.Array)
-        {
-            return candidates.Take(topK).ToList();
-        }
-
-        var scoresByIndex = new Dictionary<int, double>();
-
-        foreach (var scoreElement in scoresElement.EnumerateArray())
-        {
-            if (!scoreElement.TryGetProperty("index", out var indexElement)
-                || !scoreElement.TryGetProperty("score", out var scoreValueElement))
-            {
-                continue;
-            }
-
-            var index = indexElement.GetInt32();
-            var score = scoreValueElement.GetDouble();
-
-            if (index < 1 || index > candidates.Count)
-            {
-                continue;
-            }
-
-            scoresByIndex[index] = Math.Clamp(score, 0, 1);
-        }
-
-        if (scoresByIndex.Count == 0)
-        {
-            return candidates.Take(topK).ToList();
-        }
-
-        return candidates
-            .Select((candidate, index) =>
-            {
-                var oneBasedIndex = index + 1;
-                var rerankScore = scoresByIndex.TryGetValue(oneBasedIndex, out var score) ? score : 0;
-
-                return candidate with { RerankScore = rerankScore };
-            })
-            .OrderByDescending(x => x.RerankScore)
-            .ThenByDescending(x => x.RrfScore)
-            .Take(topK)
-            .ToList();
     }
 
     private string BuildPrompt(RetrievalQuery query, IReadOnlyList<SearchHit> candidates)

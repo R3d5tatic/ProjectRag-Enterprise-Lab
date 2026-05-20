@@ -16,7 +16,7 @@ public sealed class HybridRetrievalSearchServiceTests
             Options.Create(new RetrievalOptions()),
             new StubVectorSearchService([]),
             new StubKeywordSearchService([]),
-            new RrfRankFusionService(),
+            CreateRankFusionService(),
             new StubRerankerService());
 
         var results = await service.SearchAsync(Query(""), topK: 5, filters: null, CancellationToken.None);
@@ -32,7 +32,7 @@ public sealed class HybridRetrievalSearchServiceTests
             Options.Create(new RetrievalOptions()),
             new StubVectorSearchService([vectorHit]),
             new StubKeywordSearchService([]),
-            new RrfRankFusionService(),
+            CreateRankFusionService(),
             new StubRerankerService());
 
         var results = await service.SearchAsync(
@@ -60,7 +60,7 @@ public sealed class HybridRetrievalSearchServiceTests
             Options.Create(new RetrievalOptions()),
             new StubVectorSearchService([]),
             new StubKeywordSearchService([keywordHit]),
-            new RrfRankFusionService(),
+            CreateRankFusionService(),
             new StubRerankerService());
 
         var results = await service.SearchAsync(
@@ -90,7 +90,7 @@ public sealed class HybridRetrievalSearchServiceTests
             Options.Create(new RetrievalOptions()),
             new StubVectorSearchService([vectorHit]),
             new StubKeywordSearchService([keywordHit]),
-            new RrfRankFusionService(),
+            CreateRankFusionService(),
             new StubRerankerService());
 
         var results = await service.SearchAsync(
@@ -117,7 +117,7 @@ public sealed class HybridRetrievalSearchServiceTests
             Options.Create(new RetrievalOptions()),
             new StubVectorSearchService([vectorOnly, vectorHybrid]),
             new StubKeywordSearchService([keywordOnly, keywordHybrid]),
-            new RrfRankFusionService(),
+            CreateRankFusionService(),
             new StubRerankerService());
 
         var results = await service.SearchAsync(
@@ -153,7 +153,7 @@ public sealed class HybridRetrievalSearchServiceTests
                 KeywordHit("keyword two", score: 2),
                 KeywordHit("keyword three", score: 1)
             ]),
-            new RrfRankFusionService(),
+            CreateRankFusionService(),
             reranker);
 
         var results = await service.SearchAsync(
@@ -171,6 +171,97 @@ public sealed class HybridRetrievalSearchServiceTests
     }
 
     [Fact]
+    public async Task SearchAsync_caps_candidate_count_at_max_candidate_count()
+    {
+        var vectorSearch = new StubVectorSearchService([]);
+        var keywordSearch = new StubKeywordSearchService([]);
+
+        var service = new HybridRetrievalSearchService(
+            Options.Create(new RetrievalOptions
+            {
+                CandidateCount = 50,
+                MaxCandidateCount = 25,
+                MaxTopK = 10
+            }),
+            vectorSearch,
+            keywordSearch,
+            CreateRankFusionService(),
+            new StubRerankerService());
+
+        await service.SearchAsync(
+            Query("late payment"),
+            topK: 5,
+            filters: null,
+            CancellationToken.None);
+
+        Assert.Equal(25, vectorSearch.ReceivedTopK);
+        Assert.Equal(25, keywordSearch.ReceivedTopK);
+    }
+
+    [Fact]
+    public async Task SearchAsync_caps_final_topK_at_max_topK()
+    {
+        var reranker = new StubRerankerService();
+
+        var service = new HybridRetrievalSearchService(
+            Options.Create(new RetrievalOptions
+            {
+                CandidateCount = 30,
+                MaxCandidateCount = 100,
+                MaxTopK = 3
+            }),
+            new StubVectorSearchService(
+            [
+                VectorHit("vector one", score: 5),
+                VectorHit("vector two", score: 4),
+                VectorHit("vector three", score: 3),
+                VectorHit("vector four", score: 2),
+                VectorHit("vector five", score: 1)
+            ]),
+            new StubKeywordSearchService([]),
+            CreateRankFusionService(),
+            reranker);
+
+        var results = await service.SearchAsync(
+            Query("late payment"),
+            topK: 10,
+            filters: null,
+            CancellationToken.None);
+
+        Assert.Equal(3, reranker.ReceivedTopK);
+        Assert.Equal(3, results.Count);
+    }
+
+    [Fact]
+    public async Task SearchAsync_does_not_call_reranker_when_reranking_is_disabled()
+    {
+        var reranker = new StubRerankerService();
+
+        var service = new HybridRetrievalSearchService(
+            Options.Create(new RetrievalOptions
+            {
+                EnableReranking = false,
+                CandidateCount = 10,
+                MaxCandidateCount = 20,
+                MaxTopK = 10
+            }),
+            new StubVectorSearchService([VectorHit("vector one", score: 0.9)]),
+            new StubKeywordSearchService([KeywordHit("keyword one", score: 12)]),
+            CreateRankFusionService(),
+            reranker);
+
+        var results = await service.SearchAsync(
+            Query("late payment"),
+            topK: 2,
+            filters: null,
+            CancellationToken.None);
+
+        Assert.Null(reranker.ReceivedQuery);
+        Assert.Equal(2, results.Count);
+        Assert.All(results, result => Assert.Null(result.RerankScore));
+    }
+
+    [Fact]
     public async Task SearchAsync_passes_filters_to_vector_and_keyword_search()
     {
         var vectorSearch = new StubVectorSearchService([]);
@@ -180,7 +271,7 @@ public sealed class HybridRetrievalSearchServiceTests
             Options.Create(new RetrievalOptions()),
             vectorSearch,
             keywordSearch,
-            new RrfRankFusionService(),
+            CreateRankFusionService(),
             new StubRerankerService());
 
         var filters = new SearchFilters(SourceType: "md");
@@ -237,6 +328,7 @@ public sealed class HybridRetrievalSearchServiceTests
         private readonly IReadOnlyList<SearchHit> _hits;
         public SearchFilters? ReceivedFilters { get; private set; }
         public string? ReceivedQuery { get; private set; }
+        public int? ReceivedTopK { get; private set; }
 
         public StubVectorSearchService(IReadOnlyList<SearchHit> hits)
         {
@@ -251,6 +343,7 @@ public sealed class HybridRetrievalSearchServiceTests
         {
             ReceivedQuery = query;
             ReceivedFilters = filters;
+            ReceivedTopK = topK;
             return Task.FromResult(_hits.Take(topK).ToList() as IReadOnlyList<SearchHit>);
         }
     }
@@ -260,6 +353,7 @@ public sealed class HybridRetrievalSearchServiceTests
         private readonly IReadOnlyList<SearchHit> _hits;
         public SearchFilters? ReceivedFilters { get; private set; }
         public string? ReceivedQuery { get; private set; }
+        public int? ReceivedTopK { get; private set; }
 
         public StubKeywordSearchService(IReadOnlyList<SearchHit> hits)
         {
@@ -274,6 +368,7 @@ public sealed class HybridRetrievalSearchServiceTests
         {
             ReceivedFilters = filters;
             ReceivedQuery = query;
+            ReceivedTopK = topK;
             return Task.FromResult(_hits.Take(topK).ToList() as IReadOnlyList<SearchHit>);
         }
     }
@@ -284,6 +379,11 @@ public sealed class HybridRetrievalSearchServiceTests
             OriginalQuery: query,
             SemanticQuery: query,
             KeywordQuery: query);
+    }
+
+    private static RrfRankFusionService CreateRankFusionService()
+    {
+        return new RrfRankFusionService(Options.Create(new RetrievalOptions()));
     }
 
     private sealed class StubRerankerService : IRerankerService

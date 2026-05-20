@@ -36,6 +36,10 @@ internal sealed class HybridRetrievalSearchService : IRetrievalSearchService
         activity?.SetTag("rag.query.length", query.OriginalQuery.Length);
         activity?.SetTag("rag.top_k", topK);
         activity?.SetTag("rag.filters.source_type", filters?.SourceType);
+        activity?.SetTag("rag.retrieval.mode", _retrievalOptions.RetrievalMode);
+        activity?.SetTag("rag.retrieval.fusion_mode", _retrievalOptions.FusionMode);
+        activity?.SetTag("rag.retrieval.reranker_mode", GetEffectiveRerankerMode());
+        activity?.SetTag("rag.retrieval.reranking_enabled", _retrievalOptions.EnableReranking);
 
         if (string.IsNullOrWhiteSpace(query.OriginalQuery)
             && string.IsNullOrWhiteSpace(query.SemanticQuery)
@@ -45,7 +49,9 @@ internal sealed class HybridRetrievalSearchService : IRetrievalSearchService
         }
 
         topK = Math.Clamp(topK, 1, _retrievalOptions.MaxTopK);
-        var candidateCount = Math.Max(topK, _retrievalOptions.CandidateCount);
+        var candidateCount = Math.Clamp(
+            Math.Max(topK, _retrievalOptions.CandidateCount),
+            topK, _retrievalOptions.MaxCandidateCount);
 
         activity?.SetTag("rag.candidate_count", candidateCount);
 
@@ -67,11 +73,30 @@ internal sealed class HybridRetrievalSearchService : IRetrievalSearchService
             cancellationToken);
 
         activity?.SetTag("rag.fused_candidates.count", fusedCandidates.Count);
+        activity?.SetTag("rag.reranking.enabled", _retrievalOptions.EnableReranking);
+
+        if (!_retrievalOptions.EnableReranking)
+        {
+            var fusedResults = fusedCandidates
+                .Take(topK)
+                .ToList();
+
+            activity?.SetTag("rag.results.count", fusedResults.Count);
+
+            return fusedResults;
+        }
 
         var results = await _rerankerService.RerankAsync(query, fusedCandidates, topK, cancellationToken);
 
         activity?.SetTag("rag.results.count", results.Count);
 
         return results;
+    }
+
+    private string GetEffectiveRerankerMode()
+    {
+        return _retrievalOptions.EnableReranking
+            ? _retrievalOptions.RerankerMode
+            : RetrievalStrategyNames.NoReranker;
     }
 }

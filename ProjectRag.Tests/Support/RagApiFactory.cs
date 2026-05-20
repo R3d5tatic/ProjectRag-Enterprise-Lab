@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using ProjectRag.Application.Abstractions;
@@ -15,10 +16,32 @@ namespace ProjectRag.Tests.Support;
 public sealed class RagApiFactory : WebApplicationFactory<Program>, IDisposable
 {
     private readonly SqliteConnection _connection = new("Data Source=:memory:");
+    private readonly IReadOnlyDictionary<string, string?>? _configurationOverrides;
+    private readonly Func<IServiceProvider, IRetrievalSearchService>? _retrievalSearchServiceFactory;
+
+    public RagApiFactory()
+    {
+    }
+
+    internal RagApiFactory(
+        IReadOnlyDictionary<string, string?> configurationOverrides,
+        Func<IServiceProvider, IRetrievalSearchService>? retrievalSearchServiceFactory = null)
+    {
+        _configurationOverrides = configurationOverrides;
+        _retrievalSearchServiceFactory = retrievalSearchServiceFactory;
+    }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         _connection.Open();
+
+        builder.ConfigureAppConfiguration((_, configurationBuilder) =>
+        {
+            if (_configurationOverrides is not null)
+            {
+                configurationBuilder.AddInMemoryCollection(_configurationOverrides);
+            }
+        });
 
         builder.ConfigureServices(services =>
         {
@@ -41,7 +64,14 @@ public sealed class RagApiFactory : WebApplicationFactory<Program>, IDisposable
             services.AddScoped<IQueryRewriteService, FakeQueryRewriteService>();
             services.AddScoped<IVectorSearchService, FakeVectorSearchService>();
             services.AddScoped<IKeywordSearchService, InMemoryKeywordSearchService>();
-            services.AddScoped<IRetrievalSearchService, HybridRetrievalSearchService>();
+            if (_retrievalSearchServiceFactory is null)
+            {
+                services.AddScoped<IRetrievalSearchService, HybridRetrievalSearchService>();
+            }
+            else
+            {
+                services.AddScoped<IRetrievalSearchService>(_retrievalSearchServiceFactory);
+            }
             services.AddScoped<IRerankerService, FakeRerankerService>();
 
             services.AddDbContext<RagDbContext>(options =>

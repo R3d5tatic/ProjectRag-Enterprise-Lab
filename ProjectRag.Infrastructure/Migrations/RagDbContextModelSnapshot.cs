@@ -17,6 +17,43 @@ namespace ProjectRag.Infrastructure.Migrations
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.7");
 
+            modelBuilder.Entity("ProjectRag.Domain.Entities.DataSource", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("KnowledgeBaseId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceUri")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("KnowledgeBaseId");
+
+                    b.ToTable("DataSources");
+                });
+
             modelBuilder.Entity("ProjectRag.Domain.Entities.Document", b =>
                 {
                     b.Property<Guid>("Id")
@@ -29,6 +66,12 @@ namespace ProjectRag.Infrastructure.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("DataSourceId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("KnowledgeBaseId")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SourceType")
@@ -51,6 +94,10 @@ namespace ProjectRag.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("ContentHash");
+
+                    b.HasIndex("DataSourceId");
+
+                    b.HasIndex("KnowledgeBaseId");
 
                     b.ToTable("Documents");
                 });
@@ -99,7 +146,7 @@ namespace ProjectRag.Infrastructure.Migrations
                     b.ToTable("DocumentChunks");
                 });
 
-            modelBuilder.Entity("ProjectRag.Domain.Entities.IngestionJob", b =>
+            modelBuilder.Entity("ProjectRag.Domain.Entities.IngestionItem", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
@@ -111,8 +158,58 @@ namespace ProjectRag.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("DocumentId")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ErrorMessage")
                         .HasMaxLength(4000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("IngestionRunId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceUri")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DocumentId");
+
+                    b.HasIndex("IngestionRunId");
+
+                    b.HasIndex("SourceUri");
+
+                    b.ToTable("IngestionItems");
+                });
+
+            modelBuilder.Entity("ProjectRag.Domain.Entities.IngestionRun", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("DataSourceId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasMaxLength(4000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("KnowledgeBaseId")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SourcePath")
@@ -128,7 +225,69 @@ namespace ProjectRag.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("IngestionJobs");
+                    b.HasIndex("DataSourceId");
+
+                    b.HasIndex("KnowledgeBaseId");
+
+                    b.ToTable("IngestionRuns");
+                });
+
+            modelBuilder.Entity("ProjectRag.Domain.Entities.KnowledgeBase", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Name")
+                        .IsUnique();
+
+                    b.ToTable("KnowledgeBases");
+                });
+
+            modelBuilder.Entity("ProjectRag.Domain.Entities.DataSource", b =>
+                {
+                    b.HasOne("ProjectRag.Domain.Entities.KnowledgeBase", "KnowledgeBase")
+                        .WithMany("DataSources")
+                        .HasForeignKey("KnowledgeBaseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("KnowledgeBase");
+                });
+
+            modelBuilder.Entity("ProjectRag.Domain.Entities.Document", b =>
+                {
+                    b.HasOne("ProjectRag.Domain.Entities.DataSource", "DataSource")
+                        .WithMany("Documents")
+                        .HasForeignKey("DataSourceId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("ProjectRag.Domain.Entities.KnowledgeBase", "KnowledgeBase")
+                        .WithMany("Documents")
+                        .HasForeignKey("KnowledgeBaseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("DataSource");
+
+                    b.Navigation("KnowledgeBase");
                 });
 
             modelBuilder.Entity("ProjectRag.Domain.Entities.DocumentChunk", b =>
@@ -142,9 +301,67 @@ namespace ProjectRag.Infrastructure.Migrations
                     b.Navigation("Document");
                 });
 
+            modelBuilder.Entity("ProjectRag.Domain.Entities.IngestionItem", b =>
+                {
+                    b.HasOne("ProjectRag.Domain.Entities.Document", "Document")
+                        .WithMany()
+                        .HasForeignKey("DocumentId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("ProjectRag.Domain.Entities.IngestionRun", "IngestionRun")
+                        .WithMany("Items")
+                        .HasForeignKey("IngestionRunId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Document");
+
+                    b.Navigation("IngestionRun");
+                });
+
+            modelBuilder.Entity("ProjectRag.Domain.Entities.IngestionRun", b =>
+                {
+                    b.HasOne("ProjectRag.Domain.Entities.DataSource", "DataSource")
+                        .WithMany("IngestionsRuns")
+                        .HasForeignKey("DataSourceId")
+                        .OnDelete(DeleteBehavior.SetNull)
+                        .IsRequired();
+
+                    b.HasOne("ProjectRag.Domain.Entities.KnowledgeBase", "KnowledgeBase")
+                        .WithMany("IngestionRuns")
+                        .HasForeignKey("KnowledgeBaseId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("DataSource");
+
+                    b.Navigation("KnowledgeBase");
+                });
+
+            modelBuilder.Entity("ProjectRag.Domain.Entities.DataSource", b =>
+                {
+                    b.Navigation("Documents");
+
+                    b.Navigation("IngestionsRuns");
+                });
+
             modelBuilder.Entity("ProjectRag.Domain.Entities.Document", b =>
                 {
                     b.Navigation("Chunks");
+                });
+
+            modelBuilder.Entity("ProjectRag.Domain.Entities.IngestionRun", b =>
+                {
+                    b.Navigation("Items");
+                });
+
+            modelBuilder.Entity("ProjectRag.Domain.Entities.KnowledgeBase", b =>
+                {
+                    b.Navigation("DataSources");
+
+                    b.Navigation("Documents");
+
+                    b.Navigation("IngestionRuns");
                 });
 #pragma warning restore 612, 618
         }

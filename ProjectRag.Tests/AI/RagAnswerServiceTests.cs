@@ -48,11 +48,14 @@ public sealed class RagAnswerServiceTests
         Assert.Equal(hit.ChunkId, citation.ChunkId);
 
         Assert.Equal(5, result.RetrievalDiagnostics.RequestedTopK);
+        Assert.Equal(30, result.RetrievalDiagnostics.CandidateCount);
         Assert.Equal(1, result.RetrievalDiagnostics.ReturnedContextCount);
         Assert.True(result.RetrievalDiagnostics.RerankingApplied);
+        AssertRetrievalStrategy(result.RetrievalDiagnostics);
 
         Assert.Equal("Ollama", result.ModelInfo.ChatProvider);
         Assert.Equal("llama3.2", result.ModelInfo.ChatModel);
+        Assert.Equal("Ollama", result.ModelInfo.EmbeddingProvider);
         Assert.Equal("nomic-embed-text", result.ModelInfo.EmbeddingModel);
     }
 
@@ -74,7 +77,9 @@ public sealed class RagAnswerServiceTests
         Assert.Empty(result.Claims);
 
         Assert.Single(result.Citations);
+        Assert.Equal(30, result.RetrievalDiagnostics.CandidateCount);
         Assert.Equal(1, result.RetrievalDiagnostics.ReturnedContextCount);
+        AssertRetrievalStrategy(result.RetrievalDiagnostics);
     }
 
     [Fact]
@@ -106,7 +111,9 @@ public sealed class RagAnswerServiceTests
         Assert.Empty(result.Claims);
 
         Assert.Single(result.Citations);
+        Assert.Equal(30, result.RetrievalDiagnostics.CandidateCount);
         Assert.Equal(1, result.RetrievalDiagnostics.ReturnedContextCount);
+        AssertRetrievalStrategy(result.RetrievalDiagnostics);
     }
 
     [Fact]
@@ -115,11 +122,17 @@ public sealed class RagAnswerServiceTests
         var chatClient = new CountingChatClient();
 
         var service = new RagAnswerService(
-            Options.Create(new AiOptions
+            Options.Create(new ChatRuntimeOptions
             {
-                ChatModel = "llama3.2",
-                EmbeddingModel = "nomic-embed-text"
+                Provider = "Ollama",
+                Model = "llama3.2"
             }),
+            Options.Create(new EmbeddingRuntimeOptions
+            {
+                Provider = "Ollama",
+                Model = "nomic-embed-text"
+            }),
+            Options.Create(new RetrievalOptions()),
             new StubRetrievalSearchService([]),
             chatClient,
             new StubQueryRewriteService());
@@ -135,24 +148,113 @@ public sealed class RagAnswerServiceTests
         Assert.Empty(result.Claims);
         Assert.Empty(result.Citations);
 
+        Assert.Equal(30, result.RetrievalDiagnostics.CandidateCount);
         Assert.Equal(0, result.RetrievalDiagnostics.ReturnedContextCount);
         Assert.False(result.RetrievalDiagnostics.RerankingApplied);
+        AssertRetrievalStrategy(result.RetrievalDiagnostics);
         Assert.Equal(0, chatClient.CallCount);
+    }
+
+    [Fact]
+    public async Task AnswerAsync_returns_retrieval_strategy_from_options()
+    {
+        var service = CreateService(
+            [Hit("Late balances may receive a monthly fee after a grace period.", rerankScore: 0.95)],
+            """
+            {
+              "answerStatus": "answered",
+              "answer": "Late balances may receive a monthly fee after a grace period.",
+              "claims": [
+                {
+                  "text": "Late balances may receive a monthly fee after a grace period.",
+                  "sourceIndexes": [1]
+                }
+              ]
+            }
+            """,
+            new RetrievalOptions
+            {
+                CandidateCount = 42,
+                RetrievalMode = "semantic",
+                FusionMode = RetrievalStrategyNames.ElasticNativeRrf,
+                RerankerMode = RetrievalStrategyNames.NoReranker,
+                RrfConstant = 99
+            });
+
+        var result = await service.AnswerAsync(
+            "What are the late payment fees?",
+            topK: 5,
+            filters: null,
+            CancellationToken.None);
+
+        Assert.Equal(42, result.RetrievalDiagnostics.CandidateCount);
+        Assert.Equal("semantic", result.RetrievalDiagnostics.RetrievalMode);
+        Assert.Equal(RetrievalStrategyNames.ElasticNativeRrf, result.RetrievalDiagnostics.FusionMode);
+        Assert.Equal(RetrievalStrategyNames.NoReranker, result.RetrievalDiagnostics.RerankerMode);
+        Assert.Equal(99, result.RetrievalDiagnostics.RrfConstant);
+    }
+
+    [Fact]
+    public async Task AnswerAsync_reports_none_reranker_mode_when_reranking_is_disabled()
+    {
+        var service = CreateService(
+            [Hit("Late balances may receive a monthly fee after a grace period.")],
+            """
+            {
+              "answerStatus": "answered",
+              "answer": "Late balances may receive a monthly fee after a grace period.",
+              "claims": [
+                {
+                  "text": "Late balances may receive a monthly fee after a grace period.",
+                  "sourceIndexes": [1]
+                }
+              ]
+            }
+            """,
+            new RetrievalOptions
+            {
+                EnableReranking = false,
+                RerankerMode = RetrievalStrategyNames.LlmReranker
+            });
+
+        var result = await service.AnswerAsync(
+            "What are the late payment fees?",
+            topK: 5,
+            filters: null,
+            CancellationToken.None);
+
+        Assert.False(result.RetrievalDiagnostics.RerankingApplied);
+        Assert.Equal(RetrievalStrategyNames.NoReranker, result.RetrievalDiagnostics.RerankerMode);
     }
 
     private static RagAnswerService CreateService(
         IReadOnlyList<SearchHit> hits,
-        string chatResponse)
+        string chatResponse,
+        RetrievalOptions? retrievalOptions = null)
     {
         return new RagAnswerService(
-            Options.Create(new AiOptions
+            Options.Create(new ChatRuntimeOptions
             {
-                ChatModel = "llama3.2",
-                EmbeddingModel = "nomic-embed-text"
+                Provider = "Ollama",
+                Model = "llama3.2"
             }),
+            Options.Create(new EmbeddingRuntimeOptions
+            {
+                Provider = "Ollama",
+                Model = "nomic-embed-text"
+            }),
+            Options.Create(retrievalOptions ?? new RetrievalOptions()),
             new StubRetrievalSearchService(hits),
             new FakeChatClient(chatResponse),
             new StubQueryRewriteService());
+    }
+
+    private static void AssertRetrievalStrategy(RetrievalDiagnostics diagnostics)
+    {
+        Assert.Equal(RetrievalStrategyNames.Hybrid, diagnostics.RetrievalMode);
+        Assert.Equal(RetrievalStrategyNames.ApplicationRrf, diagnostics.FusionMode);
+        Assert.Equal(RetrievalStrategyNames.LlmReranker, diagnostics.RerankerMode);
+        Assert.Equal(60, diagnostics.RrfConstant);
     }
 
     private static SearchHit Hit(string text, double? rerankScore = null)

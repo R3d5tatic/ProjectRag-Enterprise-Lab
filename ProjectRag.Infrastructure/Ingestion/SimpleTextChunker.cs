@@ -1,11 +1,18 @@
-﻿using ProjectRag.Application.Abstractions;
+﻿using Microsoft.Extensions.Options;
+using ProjectRag.Application.Abstractions;
 using ProjectRag.Application.Models;
+using ProjectRag.Infrastructure.Options;
 
 namespace ProjectRag.Infrastructure.Ingestion;
 
 internal sealed class SimpleTextChunker : ITextChunker
 {
-    private const int MaxChunkSize = 1_200;
+    private readonly ChunkingOptions _options;
+
+    public SimpleTextChunker(IOptions<ChunkingOptions> options)
+    {
+        _options = options.Value;
+    }
 
     public IReadOnlyList<TextChunk> Chunk(string text)
     {
@@ -15,8 +22,7 @@ internal sealed class SimpleTextChunker : ITextChunker
         }
 
         var paragraphs = text
-            .Replace("\r\n", "\n")
-            .Split("\n\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            .Split(["\r\n\r\n", "\n\n"], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         var chunks = new List<TextChunk>();
         var current = new List<string>();
@@ -24,7 +30,7 @@ internal sealed class SimpleTextChunker : ITextChunker
 
         foreach (var paragraph in paragraphs)
         {
-            if (currentLength + paragraph.Length > MaxChunkSize && current.Count > 0)
+            if (currentLength + paragraph.Length > _options.MaxChunkSize && current.Count > 0)
             {
                 AddChunk(chunks, current);
                 current.Clear();
@@ -48,9 +54,9 @@ internal sealed class SimpleTextChunker : ITextChunker
         var text = string.Join("\n\n", paragraphs).Trim();
 
         chunks.Add(new TextChunk(
-            chunks.Count,
-            text,
-            ExtractSectionTitle(text)));
+            ChunkIndex: chunks.Count,
+            Text: text,
+            SectionTitle: ExtractSectionTitle(text)));
     }
 
     private static string? ExtractSectionTitle(string text)

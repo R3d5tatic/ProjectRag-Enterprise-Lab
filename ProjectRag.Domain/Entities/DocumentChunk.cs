@@ -6,7 +6,6 @@ public sealed class DocumentChunk
 {
     public Guid Id { get; set; }
     public Guid DocumentId { get; set; }
-    public Document? Document { get; set; }
     public int ChunkIndex { get; set; }
     public string Text { get; set; } = "";
     public int? PageNumber { get; set; }
@@ -15,4 +14,5 @@ public sealed class DocumentChunk
     public string? BoundingRegionsJson { get; set; }
     public ChunkKind Kind { get; set; }
     public DateTime CreatedAt { get; set; }
+    public Document? Document { get; set; }
 }
